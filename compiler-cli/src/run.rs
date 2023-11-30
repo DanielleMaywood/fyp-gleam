@@ -110,6 +110,13 @@ pub fn command(
             }
             Runtime::Bun => run_javascript_bun(&paths, &main_function.package, &module, arguments),
         },
+        Target::WebAssembly => match runtime {
+            Some(r) => Err(Error::InvalidRuntime {
+                target: Target::WebAssembly,
+                invalid_runtime: r,
+            }),
+            _ => unimplemented!(),
+        },
     }?;
 
     std::process::exit(status);

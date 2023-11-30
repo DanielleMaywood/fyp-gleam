@@ -147,6 +147,7 @@ impl<'comments> Formatter<'comments> {
             None => document,
             Some(Target::Erlang) => docvec!["@target(erlang)", line(), document],
             Some(Target::JavaScript) => docvec!["@target(javascript)", line(), document],
+            Some(Target::WebAssembly) => docvec!["@target(webassembly)", line(), document],
         };
         commented(document, comments)
     }

@@ -115,6 +115,7 @@ struct Attributes {
     deprecated: Deprecation,
     external_erlang: Option<(EcoString, EcoString)>,
     external_javascript: Option<(EcoString, EcoString)>,
+    external_wasm: Option<(EcoString, EcoString)>,
     internal: InternalAttribute,
 }
 
@@ -1616,6 +1617,7 @@ where
             deprecation: std::mem::take(&mut attributes.deprecated),
             external_erlang: attributes.external_erlang.take(),
             external_javascript: attributes.external_javascript.take(),
+            external_wasm: attributes.external_wasm.take(),
             implementations: Implementations {
                 gleam: true,
                 can_run_on_erlang: true,

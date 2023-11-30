@@ -3168,6 +3168,10 @@ but you are using v{gleam_version}.",
                         "You can not set a runtime for Erlang. Did you mean to target JavaScript?"
                             .into(),
                     ),
+                    Target::WebAssembly => Some(
+                        "You can not set a runtime for WebAssembly. Did you mean to target JavaScript?"
+                            .into(),
+                    ),
                 };
 
                 Diagnostic {

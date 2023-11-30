@@ -1,4 +1,5 @@
 use crate::analyse::TargetSupport;
+use crate::codegen::WebAssembly;
 use crate::line_numbers::{self, LineNumbers};
 use crate::type_::PRELUDE_MODULE_NAME;
 use crate::{
@@ -287,7 +288,12 @@ where
             TargetCodegenConfiguration::Erlang { app_file } => {
                 self.perform_erlang_codegen(modules, app_file.as_ref())
             }
+            TargetCodegenConfiguration::WebAssembly {} => self.perform_wasm_codegen(modules),
         }
+    }
+
+    fn perform_wasm_codegen(&mut self, modules: &[Module]) -> Result<(), Error> {
+        WebAssembly::new(&self.out).render(&self.io, modules)
     }
 
     fn perform_erlang_codegen(

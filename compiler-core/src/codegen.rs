@@ -6,7 +6,7 @@ use crate::{
     io::FileSystemWriter,
     javascript,
     line_numbers::LineNumbers,
-    Result,
+    wasm, Result,
 };
 use itertools::Itertools;
 use std::fmt::Debug;
@@ -234,5 +234,25 @@ impl<'a> JavaScript<'a> {
         );
         tracing::debug!(name = ?js_name, "Generated js module");
         writer.write(&path, &output?)
+    }
+}
+
+#[derive(Debug)]
+pub struct WebAssembly<'a> {
+    output_directory: &'a Utf8Path,
+}
+
+impl<'a> WebAssembly<'a> {
+    pub fn new(output_directory: &'a Utf8Path) -> Self {
+        Self { output_directory }
+    }
+
+    pub fn render(&self, writer: &impl FileSystemWriter, modules: &[Module]) -> Result<()> {
+        let name = "program.wasm";
+        let path = self.output_directory.join(name);
+
+        let output = wasm::program(modules);
+
+        writer.write_bytes(&path, &output?)
     }
 }

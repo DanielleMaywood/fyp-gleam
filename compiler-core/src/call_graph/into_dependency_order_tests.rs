@@ -37,6 +37,7 @@ fn parse_and_order(
             documentation: None,
             external_erlang: None,
             external_javascript: None,
+            external_wasm: None,
             implementations: Implementations {
                 gleam: true,
                 uses_erlang_externals: true,
