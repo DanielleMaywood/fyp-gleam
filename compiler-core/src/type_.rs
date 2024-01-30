@@ -486,6 +486,7 @@ impl ValueConstructorVariant {
                 can_run_on_javascript: true,
                 uses_javascript_externals: false,
                 uses_erlang_externals: false,
+                uses_wasm_externals: false,
             },
 
             ValueConstructorVariant::ModuleFn {

@@ -2649,6 +2649,7 @@ and there is no implementation for the {} target.\n",
                         match current_target {
                             Target::Erlang => "Erlang",
                             Target::JavaScript => "JavaScript",
+                            Target::WebAssembly => "WebAssembly",
                         }
                     );
                     let hint = wrap("Did you mean to build for a different target?");
