@@ -55,11 +55,11 @@ impl Function {
         }
     }
 
-    pub fn declare_local(&mut self, name: EcoString, type_: ValType) -> Index<Local> {
+    pub fn declare_local(&mut self, name: impl Into<EcoString>, type_: ValType) -> Index<Local> {
         let index = Index::new(self.local_count);
         self.local_count += 1;
         self.locals.push(type_);
-        _ = self.local_map.insert(name, index);
+        _ = self.local_map.insert(name.into(), index);
         index
     }
 
@@ -99,7 +99,9 @@ impl Encode for Function {
         let mut function = wasm_encoder::Function::new_with_locals_types(locals);
 
         for instruction in &self.instructions {
-            _ = function.instruction(&instruction.encode(module, encoder));
+            for encoded in &instruction.encode(module, encoder) {
+                _ = function.instruction(encoded);
+            }
         }
 
         _ = encoder.code_section.function(&function);

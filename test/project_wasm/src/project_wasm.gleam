@@ -20,6 +20,11 @@ fn fib(n: Int) {
   do_fib(n, 0, 1)
 }
 
+type AorB {
+  A
+  B
+}
+
 pub fn main() {
   let pair =
     Pair(2, 8)
@@ -51,11 +56,16 @@ pub fn main() {
   let _ = !False
   let _ = -5
   let _ = #(1, 2)
-  let _ = [1, 2]
-  let _ = [1, 2, ..[1, 2]]
+  // let _ = [1, 2]
+  // let _ = [1, 2, ..[1, 2]]
   let _ = #(2, 3).0
-  let _ = "h"
-  let _ = "hello" <> " " <> "world"
+  // let _ = "h"
+  // let _ = "hello" <> " " <> "world"
+  let _ = fib(40)
+  let _ = Nil
 
-  fib(40)
+  case A {
+    A -> fib(40)
+    B -> 0
+  }
 }

@@ -3,6 +3,18 @@
 
 #[rustfmt::skip]
 #[test]
+fn .DS_Store() {
+    let output =
+        crate::prepare("./cases/.DS_Store");
+    insta::assert_snapshot!(
+        ".DS_Store",
+        output,
+        "./cases/.DS_Store"
+    );
+}
+
+#[rustfmt::skip]
+#[test]
 fn alias_unqualified_import() {
     let output =
         crate::prepare("./cases/alias_unqualified_import");
