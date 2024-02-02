@@ -3,11 +3,52 @@ use ecow::EcoString;
 use crate::wasm::{encoder, Program};
 
 pub fn register(program: &mut Program, encoder: &mut encoder::Module) {
+    register_prelude_nil(program, encoder);
     register_prelude_int(program, encoder);
     register_prelude_float(program, encoder);
     register_prelude_bool(program, encoder);
     register_prelude_list(program, encoder);
     register_prelude_string(program, encoder);
+}
+
+fn register_prelude_nil(program: &mut Program, encoder: &mut encoder::Module) {
+    let gleam_nil_index = encoder.declare_type();
+    let gleam_nil = encoder::Type::Struct { fields: vec![] };
+
+    encoder.define_type(gleam_nil_index, gleam_nil);
+    program.register_type_index("gleam", "Nil", gleam_nil_index);
+
+    let gleam_nil_constructor_type_index = encoder.declare_type();
+    let gleam_nil_constructor_type = encoder::Type::Function {
+        params: vec![],
+        results: vec![encoder::ValType::Ref(encoder::RefType {
+            nullable: true,
+            heap_type: encoder::HeapType::Concrete(gleam_nil_index),
+        })],
+    };
+
+    encoder.define_type(gleam_nil_constructor_type_index, gleam_nil_constructor_type);
+
+    let gleam_nil_constructor_index = encoder.declare_function();
+    let gleam_nil_constructor = {
+        let mut function = encoder::Function::new(
+            gleam_nil_constructor_index,
+            gleam_nil_constructor_type_index,
+            EcoString::from("gleam/Nil"),
+            encoder::FunctionLinkage::Local,
+            vec![],
+        );
+
+        function.instruction(encoder::Instruction::StructNew {
+            type_: gleam_nil_index,
+            args: vec![],
+        });
+        function.instruction(encoder::Instruction::End);
+        function
+    };
+
+    encoder.define_function(gleam_nil_constructor_index, gleam_nil_constructor);
+    program.register_function_index("gleam", "Nil", gleam_nil_constructor_index);
 }
 
 fn register_prelude_int(program: &mut Program, encoder: &mut encoder::Module) {
