@@ -1118,72 +1118,77 @@ fn encode_expression(
             Ok(clauses
                 .iter()
                 .rfold(encoder::Instruction::Unreachable, |else_, clause| {
-                    assert_eq!(
-                        clause.pattern.len(),
-                        1,
-                        "Currently multi pattern case expressions aren't supported"
-                    );
+                    let condition = clause
+                        .pattern
+                        .iter()
+                        .zip(subject_locals.iter())
+                        .rev()
+                        .rfold(
+                            encoder::Instruction::I32Const(1),
+                            |then, (clause, subject)| {
+                                let condition = match clause {
+                                    Pattern::Int { value, .. } => {
+                                        let gleam_int_type =
+                                            program.resolve_type_index(encoder, &prelude::int());
 
-                    let condition = match &clause.pattern[0] {
-                        Pattern::Int { value, .. } => {
-                            let gleam_int_type =
-                                program.resolve_type_index(encoder, &prelude::int());
+                                        let value = value.parse::<i64>().unwrap();
 
-                            let value = value.parse::<i64>().unwrap();
+                                        encoder::Instruction::I64Eq {
+                                            lhs: Box::new(encoder::Instruction::StructGet {
+                                                from: Box::new(encoder::Instruction::LocalGet(
+                                                    *subject,
+                                                )),
+                                                type_: gleam_int_type,
+                                                index: 0,
+                                            }),
+                                            rhs: Box::new(encoder::Instruction::I64Const(value)),
+                                        }
+                                    }
+                                    Pattern::Float { value, .. } => {
+                                        let gleam_float_type =
+                                            program.resolve_type_index(encoder, &prelude::float());
 
-                            encoder::Instruction::I64Eq {
-                                lhs: Box::new(encoder::Instruction::StructGet {
-                                    from: Box::new(encoder::Instruction::LocalGet(
-                                        subject_locals[0],
-                                    )),
-                                    type_: gleam_int_type,
-                                    index: 0,
-                                }),
-                                rhs: Box::new(encoder::Instruction::I64Const(value)),
-                            }
-                        }
-                        Pattern::Float { value, .. } => {
-                            let gleam_float_type =
-                                program.resolve_type_index(encoder, &prelude::float());
+                                        let value = value.parse::<f64>().unwrap();
 
-                            let value = value.parse::<f64>().unwrap();
+                                        encoder::Instruction::F64Eq {
+                                            lhs: Box::new(encoder::Instruction::StructGet {
+                                                from: Box::new(encoder::Instruction::LocalGet(
+                                                    *subject,
+                                                )),
+                                                type_: gleam_float_type,
+                                                index: 0,
+                                            }),
+                                            rhs: Box::new(encoder::Instruction::F64Const(value)),
+                                        }
+                                    }
+                                    Pattern::Discard { .. } => encoder::Instruction::I32Const(1),
+                                    Pattern::Constructor { name, type_, .. } => {
+                                        let type_index = program.resolve_type_index(encoder, type_);
+                                        let tag = program
+                                            .resolve_type_variant_tag(type_index, name.clone());
 
-                            encoder::Instruction::F64Eq {
-                                lhs: Box::new(encoder::Instruction::StructGet {
-                                    from: Box::new(encoder::Instruction::LocalGet(
-                                        subject_locals[0],
-                                    )),
-                                    type_: gleam_float_type,
-                                    index: 0,
-                                }),
-                                rhs: Box::new(encoder::Instruction::F64Const(value)),
-                            }
-                        }
-                        Pattern::String { .. } => todo!(),
-                        Pattern::Variable { .. } => todo!(),
-                        Pattern::VarUsage { .. } => todo!(),
-                        Pattern::Assign { .. } => todo!(),
-                        Pattern::Discard { .. } => encoder::Instruction::I32Const(1),
-                        Pattern::List { .. } => todo!(),
-                        Pattern::Constructor { name, type_, .. } => {
-                            let type_index = program.resolve_type_index(encoder, type_);
-                            let tag = program.resolve_type_variant_tag(type_index, name.clone());
+                                        encoder::Instruction::I32Eq {
+                                            lhs: Box::new(encoder::Instruction::StructGet {
+                                                from: Box::new(encoder::Instruction::LocalGet(
+                                                    *subject,
+                                                )),
+                                                type_: type_index,
+                                                index: 0,
+                                            }),
+                                            rhs: Box::new(encoder::Instruction::I32Const(tag)),
+                                        }
+                                    }
+                                    _ => todo!("{:?}", clause),
+                                };
 
-                            encoder::Instruction::I32Eq {
-                                lhs: Box::new(encoder::Instruction::StructGet {
-                                    from: Box::new(encoder::Instruction::LocalGet(
-                                        subject_locals[0],
-                                    )),
-                                    type_: type_index,
-                                    index: 0,
-                                }),
-                                rhs: Box::new(encoder::Instruction::I32Const(tag)),
-                            }
-                        }
-                        Pattern::Tuple { .. } => todo!(),
-                        Pattern::BitArray { .. } => todo!(),
-                        Pattern::StringPrefix { .. } => todo!(),
-                    };
+                                encoder::Instruction::If {
+                                    type_: encoder::BlockType::Result(encoder::ValType::I32),
+                                    cond: Box::new(condition),
+                                    then: vec![then],
+                                    else_: vec![encoder::Instruction::I32Const(0)],
+                                }
+                            },
+                        );
 
                     let then = encode_expression(program, encoder, module, function, &clause.then)
                         .unwrap();

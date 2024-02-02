@@ -64,8 +64,9 @@ pub fn main() {
   let _ = fib(40)
   let _ = Nil
 
-  case A {
-    A -> fib(40)
-    B -> 0
+  case A, B {
+    A, B -> fib(40)
+    B, A -> 0
+    _, _ -> 1
   }
 }
