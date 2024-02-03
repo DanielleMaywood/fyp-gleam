@@ -573,6 +573,33 @@ fn encode_assignment(
     }
 }
 
+fn encode_string(
+    program: &mut Program,
+    encoder: &mut encoder::Module,
+    value: EcoString,
+) -> Result<Instruction> {
+    let string_type_index = program.resolve_type_index(encoder, &prelude::string());
+
+    let string_data_index = encoder.declare_data();
+    let string_data = encoder::Data::new(value.bytes().collect_vec());
+
+    encoder.define_data(string_data_index, string_data);
+
+    let string_length = i32::try_from(value.as_bytes().len()).expect("String too long");
+
+    Ok(encoder::Instruction::Block {
+        type_: encoder::BlockType::Result(encoder::ValType::Ref(encoder::RefType {
+            nullable: true,
+            heap_type: encoder::HeapType::Concrete(string_type_index),
+        })),
+        code: vec![
+            encoder::Instruction::I32Const(0),
+            encoder::Instruction::I32Const(string_length),
+            encoder::Instruction::ArrayNewData(string_type_index, string_data_index),
+        ],
+    })
+}
+
 fn encode_expression(
     program: &mut Program,
     encoder: &mut encoder::Module,
@@ -603,25 +630,7 @@ fn encode_expression(
                 args: vec![encoder::Instruction::F64Const(value)],
             })
         }
-        TypedExpr::String { value, .. } => {
-            let string_type_index = program.resolve_type_index(encoder, &expression.type_());
-
-            let string_data_index = encoder.declare_data();
-            let string_data = encoder::Data::new(value.bytes().collect_vec());
-
-            encoder.define_data(string_data_index, string_data);
-
-            let string_length = i32::try_from(value.as_bytes().len()).expect("String too long");
-
-            function.instruction(encoder::Instruction::I32Const(0));
-            function.instruction(encoder::Instruction::I32Const(string_length));
-            function.instruction(encoder::Instruction::ArrayNewData(
-                string_type_index,
-                string_data_index,
-            ));
-
-            todo!()
-        }
+        TypedExpr::String { value, .. } => encode_string(program, encoder, value.clone()),
         TypedExpr::Block { statements, .. } => {
             let block_type = program.resolve_type(encoder, &expression.type_());
 
@@ -713,15 +722,6 @@ fn encode_expression(
         TypedExpr::List { elements, tail, .. } => {
             let list_type_index = program.resolve_type_index_by_name("gleam".into(), "List".into());
 
-            if let Some(tail) = tail {
-                let instruction = encode_expression(program, encoder, module, function, tail)?;
-                function.instruction(instruction);
-            } else {
-                function.instruction(encoder::Instruction::RefNull(encoder::HeapType::Concrete(
-                    list_type_index,
-                )));
-            }
-
             match &elements.as_slice() {
                 [] => {
                     function.instruction(encoder::Instruction::StructNew {
@@ -742,7 +742,17 @@ fn encode_expression(
                 }
             }
 
-            todo!()
+            Ok(encoder::Instruction::Block {
+                type_: encoder::BlockType::Result(encoder::ValType::Ref(encoder::RefType {
+                    nullable: true,
+                    heap_type: encoder::HeapType::Concrete(list_type_index),
+                })),
+                code: vec![if let Some(tail) = tail {
+                    encode_expression(program, encoder, module, function, tail)?
+                } else {
+                    encoder::Instruction::RefNull(encoder::HeapType::Concrete(list_type_index))
+                }],
+            })
         }
         TypedExpr::Call { fun, args, .. } => {
             let call_type_index = program.resolve_type_index(encoder, &fun.type_());
@@ -1025,66 +1035,62 @@ fn encode_expression(
 
                 let string = function.declare_local("_string", local_type.clone());
                 let lhs = function.declare_local("_lhs", local_type.clone());
-                let rhs = function.declare_local("_rhs", local_type);
+                let rhs = function.declare_local("_rhs", local_type.clone());
 
-                let left = encode_expression(program, encoder, module, function, left)?;
-                function.instruction(encoder::Instruction::LocalSet {
-                    local: lhs,
-                    value: Box::new(left),
-                });
-
-                let right = encode_expression(program, encoder, module, function, right)?;
-                function.instruction(encoder::Instruction::LocalSet {
-                    local: rhs,
-                    value: Box::new(right),
-                });
-
-                // Calculate the total size of the new string
-                function.instruction(encoder::Instruction::I32Add {
-                    lhs: Box::new(encoder::Instruction::ArrayLen(Box::new(
+                Ok(encoder::Instruction::Block {
+                    type_: encoder::BlockType::Result(local_type),
+                    code: vec![
+                        encoder::Instruction::LocalSet {
+                            local: lhs,
+                            value: Box::new(encode_expression(
+                                program, encoder, module, function, left,
+                            )?),
+                        },
+                        encoder::Instruction::LocalSet {
+                            local: rhs,
+                            value: Box::new(encode_expression(
+                                program, encoder, module, function, right,
+                            )?),
+                        },
+                        // Calculate the length of the new string
+                        encoder::Instruction::I32Add {
+                            lhs: Box::new(encoder::Instruction::ArrayLen(Box::new(
+                                encoder::Instruction::LocalGet(lhs),
+                            ))),
+                            rhs: Box::new(encoder::Instruction::ArrayLen(Box::new(
+                                encoder::Instruction::LocalGet(rhs),
+                            ))),
+                        },
+                        // Create new string
+                        encoder::Instruction::LocalTee {
+                            local: string,
+                            value: Box::new(encoder::Instruction::ArrayNewDefault(
+                                gleam_string_type,
+                            )),
+                        },
+                        // Copy lhs into the new string
+                        encoder::Instruction::I32Const(0),
                         encoder::Instruction::LocalGet(lhs),
-                    ))),
-                    rhs: Box::new(encoder::Instruction::ArrayLen(Box::new(
+                        encoder::Instruction::I32Const(0),
+                        encoder::Instruction::ArrayLen(Box::new(encoder::Instruction::LocalGet(
+                            lhs,
+                        ))),
+                        encoder::Instruction::ArrayCopy(gleam_string_type, gleam_string_type),
+                        // Copy rhs into the new string
+                        encoder::Instruction::LocalGet(string),
+                        encoder::Instruction::ArrayLen(Box::new(encoder::Instruction::LocalGet(
+                            lhs,
+                        ))),
                         encoder::Instruction::LocalGet(rhs),
-                    ))),
-                });
-
-                // Create the new string with enough space for both parts
-
-                // Copy the lhs into the new string
-                function.instruction(encoder::Instruction::LocalTee {
-                    local: string,
-                    value: Box::new(encoder::Instruction::ArrayNewDefault(gleam_string_type)),
-                });
-                function.instruction(encoder::Instruction::I32Const(0));
-                function.instruction(encoder::Instruction::LocalGet(lhs));
-                function.instruction(encoder::Instruction::I32Const(0));
-                function.instruction(encoder::Instruction::ArrayLen(Box::new(
-                    encoder::Instruction::LocalGet(lhs),
-                )));
-                function.instruction(encoder::Instruction::ArrayCopy(
-                    gleam_string_type,
-                    gleam_string_type,
-                ));
-
-                // Copy the rhs into the new string
-                function.instruction(encoder::Instruction::LocalGet(string));
-                function.instruction(encoder::Instruction::ArrayLen(Box::new(
-                    encoder::Instruction::LocalGet(lhs),
-                )));
-                function.instruction(encoder::Instruction::LocalGet(rhs));
-                function.instruction(encoder::Instruction::I32Const(0));
-                function.instruction(encoder::Instruction::ArrayLen(Box::new(
-                    encoder::Instruction::LocalGet(rhs),
-                )));
-                function.instruction(encoder::Instruction::ArrayCopy(
-                    gleam_string_type,
-                    gleam_string_type,
-                ));
-
-                function.instruction(encoder::Instruction::LocalGet(string));
-
-                todo!()
+                        encoder::Instruction::I32Const(0),
+                        encoder::Instruction::ArrayLen(Box::new(encoder::Instruction::LocalGet(
+                            rhs,
+                        ))),
+                        encoder::Instruction::ArrayCopy(gleam_string_type, gleam_string_type),
+                        // Get the string
+                        encoder::Instruction::LocalGet(string),
+                    ],
+                })
             }
         },
         TypedExpr::Case {
@@ -1178,6 +1184,47 @@ fn encode_expression(
                                             rhs: Box::new(encoder::Instruction::I32Const(tag)),
                                         }
                                     }
+                                    Pattern::String { value, .. } => encoder::Instruction::If {
+                                        type_: encoder::BlockType::Result(encoder::ValType::I32),
+                                        cond: Box::new(encoder::Instruction::I32Eq {
+                                            lhs: Box::new(encoder::Instruction::ArrayLen(
+                                                Box::new(encoder::Instruction::LocalGet(*subject)),
+                                            )),
+                                            rhs: Box::new(encoder::Instruction::I32Const(
+                                                value.len().try_into().unwrap(),
+                                            )),
+                                        }),
+                                        then: vec![value.bytes().enumerate().rev().fold(
+                                            encoder::Instruction::I32Const(1),
+                                            |then, (idx, byte)| encoder::Instruction::If {
+                                                type_: encoder::BlockType::Result(
+                                                    encoder::ValType::I32,
+                                                ),
+                                                cond: Box::new(encoder::Instruction::I32Eq {
+                                                    lhs: Box::new(
+                                                        encoder::Instruction::ArrayGetU {
+                                                            array: Box::new(
+                                                                encoder::Instruction::LocalGet(
+                                                                    *subject,
+                                                                ),
+                                                            ),
+                                                            index: idx.try_into().unwrap(),
+                                                            type_: program.resolve_type_index(
+                                                                encoder,
+                                                                &prelude::string(),
+                                                            ),
+                                                        },
+                                                    ),
+                                                    rhs: Box::new(encoder::Instruction::I32Const(
+                                                        byte as i32,
+                                                    )),
+                                                }),
+                                                then: vec![then],
+                                                else_: vec![encoder::Instruction::I32Const(0)],
+                                            },
+                                        )],
+                                        else_: vec![encoder::Instruction::I32Const(0)],
+                                    },
                                     _ => todo!("{:?}", clause),
                                 };
 

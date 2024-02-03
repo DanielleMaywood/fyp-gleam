@@ -158,6 +158,11 @@ pub enum Instruction {
     ArrayNew(Index<Type>),
     ArrayNewDefault(Index<Type>),
     ArrayNewData(Index<Type>, Index<Data>),
+    ArrayGetU {
+        array: Box<Self>,
+        index: i32,
+        type_: Index<Type>,
+    },
     ArrayLen(Box<Self>),
     ArrayCopy(Index<Type>, Index<Type>),
     ArrayInitData(Index<Type>, Index<Data>),
@@ -400,6 +405,16 @@ impl Instruction {
                     module.resolve_type_index(*heap_type),
                     data.get(),
                 )]
+            }
+            Instruction::ArrayGetU {
+                array,
+                index,
+                type_,
+            } => {
+                let mut encoded = array.encode(module, encoder);
+                encoded.push(wasm_encoder::Instruction::I32Const(*index));
+                encoded.push(wasm_encoder::Instruction::ArrayGetU(type_.get()));
+                encoded
             }
             Instruction::ArrayLen(array) => {
                 let mut encoded = array.encode(module, encoder);

@@ -59,14 +59,19 @@ pub fn main() {
   // let _ = [1, 2]
   // let _ = [1, 2, ..[1, 2]]
   let _ = #(2, 3).0
-  // let _ = "h"
-  // let _ = "hello" <> " " <> "world"
+  let _ = "h"
+  let _ = "hello" <> " " <> "world"
   let _ = fib(40)
   let _ = Nil
 
-  case A, B {
+  let _ = case A, B {
     A, B -> fib(40)
     B, A -> 0
     _, _ -> 1
+  }
+
+  case "hello" {
+    "hello" -> 1
+    _else -> 0
   }
 }
