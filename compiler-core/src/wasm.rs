@@ -603,7 +603,7 @@ fn encode_float(program: &mut Program, value: f64) -> Result<encoder::Instructio
 fn encode_string(
     program: &mut Program,
     encoder: &mut encoder::Module,
-    value: EcoString,
+    value: &EcoString,
 ) -> Result<encoder::Instruction> {
     let string_type_index = program.resolve_type_index(encoder, &prelude::string());
 
@@ -697,21 +697,12 @@ fn encode_case_pattern(
                     value.len().try_into().unwrap(),
                 )),
             }),
-            then: vec![value.bytes().enumerate().rev().fold(
-                encoder::Instruction::I32Const(1),
-                |then, (idx, byte)| encoder::Instruction::If {
-                    type_: encoder::BlockType::Result(encoder::ValType::I32),
-                    cond: Box::new(encoder::Instruction::I32Eq {
-                        lhs: Box::new(encoder::Instruction::ArrayGetU {
-                            array: Box::new(encoder::Instruction::LocalGet(subject)),
-                            index: idx.try_into().unwrap(),
-                            type_: program.resolve_type_index(encoder, &prelude::string()),
-                        }),
-                        rhs: Box::new(encoder::Instruction::I32Const(byte as i32)),
-                    }),
-                    then: vec![then],
-                    else_: vec![encoder::Instruction::I32Const(0)],
-                },
+            then: vec![string_compare(
+                program,
+                encoder,
+                function,
+                value,
+                encoder::Instruction::LocalGet(subject),
             )],
             else_: vec![encoder::Instruction::I32Const(0)],
         },
@@ -963,7 +954,7 @@ fn encode_expression(
 
             encode_float(program, value)
         }
-        TypedExpr::String { value, .. } => encode_string(program, encoder, value.clone()),
+        TypedExpr::String { value, .. } => encode_string(program, encoder, value),
         TypedExpr::Block { statements, .. } => {
             let block_type = program.resolve_type(encoder, &expression.type_());
 
@@ -1025,7 +1016,24 @@ fn encode_expression(
 
                 Ok(encoder::Instruction::LocalGet(local_index))
             }
-            ValueConstructorVariant::ModuleConstant { .. } => todo!(),
+            ValueConstructorVariant::ModuleConstant { literal, .. } => match literal {
+                Constant::Int { value, .. } => {
+                    let value = value.parse().unwrap();
+
+                    encode_int(program, value)
+                }
+                Constant::Float { value, .. } => {
+                    let value = value.parse().unwrap();
+
+                    encode_float(program, value)
+                }
+                Constant::String { value, .. } => encode_string(program, encoder, value),
+                Constant::Tuple { .. } => todo!(),
+                Constant::List { .. } => todo!(),
+                Constant::Record { .. } => todo!(),
+                Constant::BitArray { .. } => todo!(),
+                Constant::Var { .. } => todo!(),
+            },
             ValueConstructorVariant::LocalConstant { .. } => todo!(),
             ValueConstructorVariant::ModuleFn { module, name, .. } => {
                 let function_index =
@@ -1584,7 +1592,7 @@ fn encode_expression(
 
                     encode_float(program, value)
                 }
-                Constant::String { value, .. } => encode_string(program, encoder, value.clone()),
+                Constant::String { value, .. } => encode_string(program, encoder, value),
                 Constant::Tuple { .. } => todo!(),
                 Constant::List { .. } => todo!(),
                 Constant::Record { .. } => todo!(),
@@ -1619,7 +1627,7 @@ fn encode_expression(
         }
         TypedExpr::Todo { .. } => todo!(),
         TypedExpr::Panic { .. } => todo!(),
-        TypedExpr::BitArray { .. } => unimplemented!(),
+        TypedExpr::BitArray { .. } => todo!(),
         TypedExpr::RecordUpdate { .. } => todo!(),
         TypedExpr::NegateBool { value, .. } => {
             let gleam_bool_type_index = program.resolve_type_index(encoder, &prelude::bool());

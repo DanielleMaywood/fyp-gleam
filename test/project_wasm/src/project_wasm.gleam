@@ -1,4 +1,4 @@
-import project_wasm/pair.{Pair}
+import project_wasm/pair.{Pair, global}
 
 type Foo {
   Foo(x: Int)
@@ -73,6 +73,12 @@ pub fn main() {
   }
 
   let _ = case "danielle" {
+    "hayleigh" -> 1
+    "danielle" -> 2
+    _otherwise -> 0
+  }
+
+  let _ = case "danielle" {
     "dan" <> rest ->
       case "dan" <> rest {
         "danielle" -> 2
@@ -113,5 +119,8 @@ pub fn main() {
   let lambda = fn(x) { x * 2 }
   let _ = lambda(5)
 
-  pair.global
+  let _ = pair.global
+  let _ = global
+
+  0
 }
