@@ -5,8 +5,8 @@ use itertools::Itertools;
 
 use crate::{
     ast::{
-        self, ArgNames, AssignName, BinOp, Clause, CustomType, Pattern, TypedAssignment, TypedExpr,
-        TypedFunction, TypedStatement,
+        self, ArgNames, AssignName, BinOp, Clause, Constant, CustomType, Pattern, TypedAssignment,
+        TypedExpr, TypedFunction, TypedStatement,
     },
     build::Module,
     error::Result,
@@ -1573,7 +1573,24 @@ fn encode_expression(
 
                 Ok(encoder::Instruction::RefFunc(function_index))
             }
-            ModuleValueConstructor::Constant { .. } => todo!(),
+            ModuleValueConstructor::Constant { literal, .. } => match literal {
+                Constant::Int { value, .. } => {
+                    let value = value.parse().unwrap();
+
+                    encode_int(program, value)
+                }
+                Constant::Float { value, .. } => {
+                    let value = value.parse().unwrap();
+
+                    encode_float(program, value)
+                }
+                Constant::String { value, .. } => encode_string(program, encoder, value.clone()),
+                Constant::Tuple { .. } => todo!(),
+                Constant::List { .. } => todo!(),
+                Constant::Record { .. } => todo!(),
+                Constant::BitArray { .. } => todo!(),
+                Constant::Var { .. } => todo!(),
+            },
         },
         TypedExpr::Tuple { typ, elems, .. } => {
             let type_index = program.resolve_type_index(encoder, &typ);

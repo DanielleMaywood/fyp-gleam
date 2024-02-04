@@ -111,5 +111,7 @@ pub fn main() {
   }
 
   let lambda = fn(x) { x * 2 }
-  lambda(5)
+  let _ = lambda(5)
+
+  pair.global
 }
