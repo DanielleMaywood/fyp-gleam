@@ -9,6 +9,7 @@ use itertools::Itertools;
 use std::ops::Deref;
 
 pub mod prelude;
+pub mod runtime;
 
 type TypeIndexCache<T> = HashMap<T, Index<encoder::Type>>;
 
@@ -91,10 +92,12 @@ impl Program {
         type_: &Type,
     ) -> encoder::ValType {
         match type_ {
-            Type::Named { .. } | Type::Fn { .. } => encoder::ValType::Ref(encoder::RefType {
-                nullable: true,
-                heap_type: encoder::HeapType::Concrete(self.resolve_type_index(encoder, type_)),
-            }),
+            Type::Tuple { .. } | Type::Named { .. } | Type::Fn { .. } => {
+                encoder::ValType::Ref(encoder::RefType {
+                    nullable: true,
+                    heap_type: encoder::HeapType::Concrete(self.resolve_type_index(encoder, type_)),
+                })
+            }
             Type::Var { type_ } => match type_.borrow().deref() {
                 TypeVar::Unbound { .. } | TypeVar::Generic { .. } => {
                     encoder::ValType::Ref(encoder::RefType {
@@ -104,7 +107,6 @@ impl Program {
                 }
                 TypeVar::Link { type_ } => self.resolve_type(encoder, type_),
             },
-            Type::Tuple { .. } => todo!(),
         }
     }
 

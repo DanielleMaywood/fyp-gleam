@@ -56,8 +56,10 @@ pub fn main() {
   let _ = !False
   let _ = -5
   let _ = #(1, 2)
-  // let _ = [1, 2]
-  // let _ = [1, 2, ..[1, 2]]
+  let _ = [1, 2]
+  let _ = [1, 2, ..[1, 2]]
+  let _ = []
+  let _ = [1, 2, ..[]]
   let _ = #(2, 3).0
   let _ = "h"
   let _ = "hello" <> " " <> "world"
@@ -70,8 +72,31 @@ pub fn main() {
     _, _ -> 1
   }
 
-  case "hello" {
-    "hello" -> 1
-    _else -> 0
+  let _ = case "danielle" {
+    "dan" <> rest ->
+      case "dan" <> rest {
+        "danielle" -> 2
+        _otherwise -> 1
+      }
+    _otherwise -> 0
+  }
+
+  let _ = case #(2, 3) {
+    #(2, 3) -> 1
+    #(_, _) -> 2
+  }
+
+  let _ = case [1, 2] {
+    [1, 3] -> 1
+    _ -> 2
+  }
+
+  case [1, 2, 3, 4] {
+    [1, 2, ..rest] ->
+      case rest {
+        [3, 4] -> 2
+        _ -> 1
+      }
+    _ -> 0
   }
 }

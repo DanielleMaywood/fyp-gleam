@@ -45,7 +45,10 @@ pub enum Instruction {
     // Reference Types Instructions
     RefNull(HeapType),
     RefFunc(Index<Function>),
-    RefCast(RefType),
+    RefCast {
+        value: Box<Self>,
+        type_: RefType,
+    },
 
     // Numeric Instructions
     I64Add {
@@ -93,6 +96,10 @@ pub enum Instruction {
         lhs: Box<Self>,
         rhs: Box<Self>,
     },
+    I32Sub {
+        lhs: Box<Self>,
+        rhs: Box<Self>,
+    },
     I32Xor {
         lhs: Box<Self>,
         rhs: Box<Self>,
@@ -103,6 +110,10 @@ pub enum Instruction {
     },
     I32Eqz(Box<Self>),
     I32Ne {
+        lhs: Box<Self>,
+        rhs: Box<Self>,
+    },
+    I32GeS {
         lhs: Box<Self>,
         rhs: Box<Self>,
     },
@@ -156,7 +167,10 @@ pub enum Instruction {
         index: u32,
     },
     ArrayNew(Index<Type>),
-    ArrayNewDefault(Index<Type>),
+    ArrayNewDefault {
+        type_: Index<Type>,
+        size: Box<Self>,
+    },
     ArrayNewData(Index<Type>, Index<Data>),
     ArrayGetU {
         array: Box<Self>,
@@ -164,7 +178,15 @@ pub enum Instruction {
         type_: Index<Type>,
     },
     ArrayLen(Box<Self>),
-    ArrayCopy(Index<Type>, Index<Type>),
+    ArrayCopy {
+        dst_type: Index<Type>,
+        dst: Box<Self>,
+        dst_offset: Box<Self>,
+        src_type: Index<Type>,
+        src: Box<Self>,
+        src_offset: Box<Self>,
+        size: Box<Self>,
+    },
     ArrayInitData(Index<Type>, Index<Data>),
 }
 
@@ -278,10 +300,12 @@ impl Instruction {
                     module.resolve_function_index(*index),
                 )]
             }
-            Instruction::RefCast(ty) => {
-                vec![wasm_encoder::Instruction::RefCast(
-                    ty.encode(module, encoder),
-                )]
+            Instruction::RefCast { value, type_ } => {
+                let mut encoded = value.encode(module, encoder);
+                encoded.push(wasm_encoder::Instruction::RefCast(
+                    type_.encode(module, encoder),
+                ));
+                encoded
             }
 
             // Numeric Instructions
@@ -327,6 +351,9 @@ impl Instruction {
             Instruction::I32Add { lhs, rhs } => {
                 Self::encode_binary_op(module, encoder, lhs, rhs, wasm_encoder::Instruction::I32Add)
             }
+            Instruction::I32Sub { lhs, rhs } => {
+                Self::encode_binary_op(module, encoder, lhs, rhs, wasm_encoder::Instruction::I32Sub)
+            }
             Instruction::I32Xor { lhs, rhs } => {
                 Self::encode_binary_op(module, encoder, lhs, rhs, wasm_encoder::Instruction::I32Xor)
             }
@@ -340,6 +367,9 @@ impl Instruction {
             }
             Instruction::I32Ne { lhs, rhs } => {
                 Self::encode_binary_op(module, encoder, lhs, rhs, wasm_encoder::Instruction::I32Ne)
+            }
+            Instruction::I32GeS { lhs, rhs } => {
+                Self::encode_binary_op(module, encoder, lhs, rhs, wasm_encoder::Instruction::I32GeS)
             }
             Instruction::I32Const(value) => vec![wasm_encoder::Instruction::I32Const(*value)],
             Instruction::F64Add { lhs, rhs } => {
@@ -395,10 +425,12 @@ impl Instruction {
                     module.resolve_type_index(*heap_type),
                 )]
             }
-            Instruction::ArrayNewDefault(heap_type) => {
-                vec![wasm_encoder::Instruction::ArrayNewDefault(
-                    module.resolve_type_index(*heap_type),
-                )]
+            Instruction::ArrayNewDefault { type_, size } => {
+                let mut encoded = size.encode(module, encoder);
+                encoded.push(wasm_encoder::Instruction::ArrayNewDefault(
+                    module.resolve_type_index(*type_),
+                ));
+                encoded
             }
             Instruction::ArrayNewData(heap_type, data) => {
                 vec![wasm_encoder::Instruction::ArrayNewData(
@@ -421,11 +453,25 @@ impl Instruction {
                 encoded.push(wasm_encoder::Instruction::ArrayLen);
                 encoded
             }
-            Instruction::ArrayCopy(src_type, dst_type) => {
-                vec![wasm_encoder::Instruction::ArrayCopy(
-                    module.resolve_type_index(*src_type),
+            Instruction::ArrayCopy {
+                dst_type,
+                dst,
+                dst_offset,
+                src_type,
+                src,
+                src_offset,
+                size,
+            } => {
+                let mut encoded = dst.encode(module, encoder);
+                encoded.extend(dst_offset.encode(module, encoder));
+                encoded.extend(src.encode(module, encoder));
+                encoded.extend(src_offset.encode(module, encoder));
+                encoded.extend(size.encode(module, encoder));
+                encoded.push(wasm_encoder::Instruction::ArrayCopy(
                     module.resolve_type_index(*dst_type),
-                )]
+                    module.resolve_type_index(*src_type),
+                ));
+                encoded
             }
             Instruction::ArrayInitData(heap_type, data) => {
                 vec![wasm_encoder::Instruction::ArrayInitData(

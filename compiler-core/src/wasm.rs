@@ -5,8 +5,8 @@ use itertools::Itertools;
 
 use crate::{
     ast::{
-        self, ArgNames, BinOp, CustomType, Pattern, TypedAssignment, TypedExpr, TypedFunction,
-        TypedStatement,
+        self, ArgNames, AssignName, BinOp, Clause, CustomType, Pattern, TypedAssignment, TypedExpr,
+        TypedFunction, TypedStatement,
     },
     build::Module,
     error::Result,
@@ -14,7 +14,10 @@ use crate::{
     wasm::program::Program,
 };
 
-use self::encoder::{BlockType, Instruction};
+use self::{
+    encoder::{BlockType, Index, Local},
+    program::runtime::string_compare,
+};
 
 mod encoder;
 mod program;
@@ -369,25 +372,29 @@ fn encode_custom_type_definition(
                     heap_type: encoder::HeapType::Concrete(constructor_type_index),
                 });
 
-                let lhs_casted_index = function.declare_local("lhs$", constructor_ref.clone());
-                let rhs_casted_index = function.declare_local("rhs$", constructor_ref);
+                let lhs_casted_index = function.declare_anonymous_local(constructor_ref.clone());
+                let rhs_casted_index = function.declare_anonymous_local(constructor_ref);
 
-                code.push(encoder::Instruction::LocalGet(lhs_index));
                 code.push(encoder::Instruction::LocalSet {
                     local: lhs_casted_index,
-                    value: Box::new(encoder::Instruction::RefCast(encoder::RefType {
-                        nullable: true,
-                        heap_type: encoder::HeapType::Concrete(constructor_type_index),
-                    })),
+                    value: Box::new(encoder::Instruction::RefCast {
+                        type_: encoder::RefType {
+                            nullable: true,
+                            heap_type: encoder::HeapType::Concrete(constructor_type_index),
+                        },
+                        value: Box::new(encoder::Instruction::LocalGet(lhs_index)),
+                    }),
                 });
 
-                code.push(encoder::Instruction::LocalGet(rhs_index));
                 code.push(encoder::Instruction::LocalSet {
                     local: rhs_casted_index,
-                    value: Box::new(encoder::Instruction::RefCast(encoder::RefType {
-                        nullable: true,
-                        heap_type: encoder::HeapType::Concrete(constructor_type_index),
-                    })),
+                    value: Box::new(encoder::Instruction::RefCast {
+                        type_: encoder::RefType {
+                            nullable: true,
+                            heap_type: encoder::HeapType::Concrete(constructor_type_index),
+                        },
+                        value: Box::new(encoder::Instruction::LocalGet(rhs_index)),
+                    }),
                 });
 
                 for (argument_index, argument) in constructor.arguments.iter().enumerate() {
@@ -417,9 +424,9 @@ fn encode_custom_type_definition(
                                 ],
                             },
                         ))),
-                        then: vec![Instruction::Return(Some(Box::new(Instruction::I32Const(
-                            0,
-                        ))))],
+                        then: vec![encoder::Instruction::Return(Some(Box::new(
+                            encoder::Instruction::I32Const(0),
+                        )))],
                         else_: vec![],
                     });
                 }
@@ -517,7 +524,7 @@ fn encode_statement(
     function: &mut encoder::Function,
     statement: &TypedStatement,
     keep_or_drop: KeepOrDrop,
-) -> Result<Instruction> {
+) -> Result<encoder::Instruction> {
     let instruction = match statement {
         TypedStatement::Expression(expression) => {
             encode_expression(program, encoder, module, function, expression)
@@ -540,7 +547,7 @@ fn encode_assignment(
     module: &Module,
     function: &mut encoder::Function,
     assignment: &TypedAssignment,
-) -> Result<Instruction> {
+) -> Result<encoder::Instruction> {
     match &assignment.pattern {
         Pattern::Int { .. } => todo!(),
         Pattern::Float { .. } => todo!(),
@@ -573,11 +580,31 @@ fn encode_assignment(
     }
 }
 
+fn encode_int(program: &mut Program, value: i64) -> Result<encoder::Instruction> {
+    let gleam_int_constructor_index =
+        program.resolve_function_index_by_name("gleam".into(), "Int".into());
+
+    Ok(encoder::Instruction::Call {
+        func: gleam_int_constructor_index,
+        args: vec![encoder::Instruction::I64Const(value)],
+    })
+}
+
+fn encode_float(program: &mut Program, value: f64) -> Result<encoder::Instruction> {
+    let gleam_float_constructor_index =
+        program.resolve_function_index_by_name("gleam".into(), "Float".into());
+
+    Ok(encoder::Instruction::Call {
+        func: gleam_float_constructor_index,
+        args: vec![encoder::Instruction::F64Const(value)],
+    })
+}
+
 fn encode_string(
     program: &mut Program,
     encoder: &mut encoder::Module,
     value: EcoString,
-) -> Result<Instruction> {
+) -> Result<encoder::Instruction> {
     let string_type_index = program.resolve_type_index(encoder, &prelude::string());
 
     let string_data_index = encoder.declare_data();
@@ -600,35 +627,323 @@ fn encode_string(
     })
 }
 
+fn encode_case_clause(
+    program: &mut Program,
+    encoder: &mut encoder::Module,
+    function: &mut encoder::Function,
+    clause: &Clause<TypedExpr, Arc<Type>, EcoString>,
+    subjects: &[Index<Local>],
+) -> encoder::Instruction {
+    clause.pattern.iter().zip(subjects.iter()).rfold(
+        encoder::Instruction::I32Const(1),
+        |then, (pattern, subject)| {
+            let condition = encode_case_pattern(program, encoder, function, pattern, *subject);
+
+            encoder::Instruction::If {
+                type_: encoder::BlockType::Result(encoder::ValType::I32),
+                cond: Box::new(condition),
+                then: vec![then],
+                else_: vec![encoder::Instruction::I32Const(0)],
+            }
+        },
+    )
+}
+
+fn encode_case_pattern(
+    program: &mut Program,
+    encoder: &mut encoder::Module,
+    function: &mut encoder::Function,
+    pattern: &Pattern<Arc<Type>>,
+    subject: Index<Local>,
+) -> encoder::Instruction {
+    match pattern {
+        Pattern::Int { value, .. } => {
+            let gleam_int_type = program.resolve_type_index(encoder, &prelude::int());
+
+            let value = value.parse::<i64>().unwrap();
+
+            encoder::Instruction::I64Eq {
+                lhs: Box::new(encoder::Instruction::StructGet {
+                    from: Box::new(encoder::Instruction::LocalGet(subject)),
+                    type_: gleam_int_type,
+                    index: 0,
+                }),
+                rhs: Box::new(encoder::Instruction::I64Const(value)),
+            }
+        }
+        Pattern::Float { value, .. } => {
+            let gleam_float_type = program.resolve_type_index(encoder, &prelude::float());
+
+            let value = value.parse::<f64>().unwrap();
+
+            encoder::Instruction::F64Eq {
+                lhs: Box::new(encoder::Instruction::StructGet {
+                    from: Box::new(encoder::Instruction::LocalGet(subject)),
+                    type_: gleam_float_type,
+                    index: 0,
+                }),
+                rhs: Box::new(encoder::Instruction::F64Const(value)),
+            }
+        }
+        Pattern::String { value, .. } => encoder::Instruction::If {
+            type_: encoder::BlockType::Result(encoder::ValType::I32),
+            // If the string lengths aren't equal, they cannot be equal
+            // so we early return.
+            cond: Box::new(encoder::Instruction::I32Eq {
+                lhs: Box::new(encoder::Instruction::ArrayLen(Box::new(
+                    encoder::Instruction::LocalGet(subject),
+                ))),
+                rhs: Box::new(encoder::Instruction::I32Const(
+                    value.len().try_into().unwrap(),
+                )),
+            }),
+            then: vec![value.bytes().enumerate().rev().fold(
+                encoder::Instruction::I32Const(1),
+                |then, (idx, byte)| encoder::Instruction::If {
+                    type_: encoder::BlockType::Result(encoder::ValType::I32),
+                    cond: Box::new(encoder::Instruction::I32Eq {
+                        lhs: Box::new(encoder::Instruction::ArrayGetU {
+                            array: Box::new(encoder::Instruction::LocalGet(subject)),
+                            index: idx.try_into().unwrap(),
+                            type_: program.resolve_type_index(encoder, &prelude::string()),
+                        }),
+                        rhs: Box::new(encoder::Instruction::I32Const(byte as i32)),
+                    }),
+                    then: vec![then],
+                    else_: vec![encoder::Instruction::I32Const(0)],
+                },
+            )],
+            else_: vec![encoder::Instruction::I32Const(0)],
+        },
+        Pattern::Variable { name, type_, .. } => {
+            let type_ = program.resolve_type(encoder, type_);
+            let local = function.declare_local(name.clone(), type_);
+
+            encoder::Instruction::Block {
+                type_: encoder::BlockType::Result(encoder::ValType::I32),
+                code: vec![
+                    encoder::Instruction::LocalSet {
+                        local,
+                        value: Box::new(encoder::Instruction::LocalGet(subject)),
+                    },
+                    encoder::Instruction::I32Const(1),
+                ],
+            }
+        }
+        Pattern::VarUsage { .. } => todo!(),
+        Pattern::Assign { .. } => todo!(),
+        Pattern::Discard { .. } => encoder::Instruction::I32Const(1),
+        Pattern::List {
+            location,
+            elements,
+            tail,
+            type_,
+        } => {
+            let list_type_index = program.resolve_type_index_by_name("gleam".into(), "List".into());
+
+            match elements.as_slice() {
+                [] => match tail {
+                    Some(tail) => encode_case_pattern(program, encoder, function, tail, subject),
+                    None => encoder::Instruction::I32Const(1),
+                },
+                [element, rest @ ..] => {
+                    let value_type_index = program.resolve_type_index(encoder, &element.type_());
+                    let value_type = program.resolve_type(encoder, &element.type_());
+                    let value_local = function.declare_anonymous_local(value_type);
+
+                    let next_local =
+                        function.declare_anonymous_local(encoder::ValType::Ref(encoder::RefType {
+                            nullable: true,
+                            heap_type: encoder::HeapType::Concrete(list_type_index),
+                        }));
+
+                    encoder::Instruction::Block {
+                        type_: encoder::BlockType::Result(encoder::ValType::I32),
+                        code: vec![
+                            encoder::Instruction::LocalSet {
+                                local: value_local,
+                                value: Box::new(encoder::Instruction::RefCast {
+                                    type_: encoder::RefType {
+                                        nullable: true,
+                                        heap_type: encoder::HeapType::Concrete(value_type_index),
+                                    },
+                                    value: Box::new(encoder::Instruction::StructGet {
+                                        from: Box::new(encoder::Instruction::LocalGet(subject)),
+                                        type_: list_type_index,
+                                        index: 1,
+                                    }),
+                                }),
+                            },
+                            encoder::Instruction::If {
+                                type_: encoder::BlockType::Result(encoder::ValType::I32),
+                                cond: Box::new(encode_case_pattern(
+                                    program,
+                                    encoder,
+                                    function,
+                                    element,
+                                    value_local,
+                                )),
+                                then: vec![
+                                    encoder::Instruction::LocalSet {
+                                        local: next_local,
+                                        value: Box::new(encoder::Instruction::StructGet {
+                                            from: Box::new(encoder::Instruction::LocalGet(subject)),
+                                            type_: list_type_index,
+                                            index: 0,
+                                        }),
+                                    },
+                                    encode_case_pattern(
+                                        program,
+                                        encoder,
+                                        function,
+                                        &Pattern::List {
+                                            location: location.clone(),
+                                            elements: rest.to_vec(),
+                                            tail: tail.clone(),
+                                            type_: type_.clone(),
+                                        },
+                                        next_local,
+                                    ),
+                                ],
+                                else_: vec![encoder::Instruction::I32Const(0)],
+                            },
+                        ],
+                    }
+                }
+            }
+        }
+        Pattern::Constructor { name, type_, .. } => {
+            let type_index = program.resolve_type_index(encoder, type_);
+            let tag = program.resolve_type_variant_tag(type_index, name.clone());
+
+            encoder::Instruction::I32Eq {
+                lhs: Box::new(encoder::Instruction::StructGet {
+                    from: Box::new(encoder::Instruction::LocalGet(subject)),
+                    type_: type_index,
+                    index: 0,
+                }),
+                rhs: Box::new(encoder::Instruction::I32Const(tag)),
+            }
+        }
+        Pattern::Tuple { elems, .. } => elems.iter().enumerate().rfold(
+            encoder::Instruction::I32Const(1),
+            |then, (index, element)| {
+                let local_type = program.resolve_type(encoder, &element.type_());
+                let local = function.declare_anonymous_local(local_type);
+
+                encoder::Instruction::Block {
+                    type_: encoder::BlockType::Result(encoder::ValType::I32),
+                    code: vec![
+                        encoder::Instruction::LocalSet {
+                            local,
+                            value: Box::new(encoder::Instruction::StructGet {
+                                from: Box::new(encoder::Instruction::LocalGet(subject)),
+                                type_: program.resolve_type_index(encoder, &pattern.type_()),
+                                index: index.try_into().unwrap(),
+                            }),
+                        },
+                        encoder::Instruction::If {
+                            type_: encoder::BlockType::Result(encoder::ValType::I32),
+                            cond: Box::new(encode_case_pattern(
+                                program, encoder, function, element, local,
+                            )),
+                            then: vec![then],
+                            else_: vec![encoder::Instruction::I32Const(0)],
+                        },
+                    ],
+                }
+            },
+        ),
+        Pattern::BitArray { .. } => todo!(),
+        Pattern::StringPrefix {
+            left_side_string,
+            right_side_assignment,
+            ..
+        } => encoder::Instruction::If {
+            type_: encoder::BlockType::Result(encoder::ValType::I32),
+            cond: Box::new(encoder::Instruction::I32GeS {
+                lhs: Box::new(encoder::Instruction::ArrayLen(Box::new(
+                    encoder::Instruction::LocalGet(subject),
+                ))),
+                rhs: Box::new(encoder::Instruction::I32Const(
+                    left_side_string.len().try_into().unwrap(),
+                )),
+            }),
+            then: vec![encoder::Instruction::If {
+                type_: encoder::BlockType::Result(encoder::ValType::I32),
+                cond: Box::new(string_compare(
+                    program,
+                    encoder,
+                    function,
+                    left_side_string.as_str(),
+                    encoder::Instruction::LocalGet(subject),
+                )),
+                then: match right_side_assignment {
+                    AssignName::Variable(name) => {
+                        let gleam_string_type =
+                            program.resolve_type_index(encoder, &prelude::string());
+
+                        let local = function.declare_local(
+                            name.clone(),
+                            program.resolve_type(encoder, &prelude::string()),
+                        );
+
+                        let string_offset = left_side_string.len().try_into().unwrap();
+                        let string_length = encoder::Instruction::I32Sub {
+                            lhs: Box::new(encoder::Instruction::ArrayLen(Box::new(
+                                encoder::Instruction::LocalGet(subject),
+                            ))),
+                            rhs: Box::new(encoder::Instruction::I32Const(string_offset)),
+                        };
+
+                        vec![
+                            encoder::Instruction::LocalSet {
+                                local,
+                                value: Box::new(encoder::Instruction::ArrayNewDefault {
+                                    type_: gleam_string_type,
+                                    size: Box::new(string_length.clone()),
+                                }),
+                            },
+                            encoder::Instruction::ArrayCopy {
+                                dst_type: gleam_string_type,
+                                dst: Box::new(encoder::Instruction::LocalGet(local)),
+                                dst_offset: Box::new(encoder::Instruction::I32Const(0)),
+                                src_type: gleam_string_type,
+                                src: Box::new(encoder::Instruction::LocalGet(subject)),
+                                src_offset: Box::new(encoder::Instruction::I32Const(string_offset)),
+                                size: Box::new(string_length),
+                            },
+                            encoder::Instruction::I32Const(1),
+                        ]
+                    }
+                    AssignName::Discard(_) => {
+                        vec![encoder::Instruction::I32Const(1)]
+                    }
+                },
+                else_: vec![encoder::Instruction::I32Const(0)],
+            }],
+            else_: vec![encoder::Instruction::I32Const(0)],
+        },
+    }
+}
+
 fn encode_expression(
     program: &mut Program,
     encoder: &mut encoder::Module,
     module: &Module,
     function: &mut encoder::Function,
     expression: &TypedExpr,
-) -> Result<Instruction> {
+) -> Result<encoder::Instruction> {
     match expression {
         TypedExpr::Int { value, .. } => {
-            let gleam_int_constructor_index =
-                program.resolve_function_index_by_name("gleam".into(), "Int".into());
-
             let value = value.parse::<i64>().expect("Value unsupported");
 
-            Ok(encoder::Instruction::Call {
-                func: gleam_int_constructor_index,
-                args: vec![encoder::Instruction::I64Const(value)],
-            })
+            encode_int(program, value)
         }
         TypedExpr::Float { value, .. } => {
-            let gleam_float_constructor_index =
-                program.resolve_function_index_by_name("gleam".into(), "Float".into());
-
             let value = value.parse::<f64>().expect("Value unsupported");
 
-            Ok(encoder::Instruction::Call {
-                func: gleam_float_constructor_index,
-                args: vec![encoder::Instruction::F64Const(value)],
-            })
+            encode_float(program, value)
         }
         TypedExpr::String { value, .. } => encode_string(program, encoder, value.clone()),
         TypedExpr::Block { statements, .. } => {
@@ -722,37 +1037,22 @@ fn encode_expression(
         TypedExpr::List { elements, tail, .. } => {
             let list_type_index = program.resolve_type_index_by_name("gleam".into(), "List".into());
 
-            match &elements.as_slice() {
-                [] => {
-                    function.instruction(encoder::Instruction::StructNew {
-                        type_: list_type_index,
-                        args: vec![encoder::Instruction::RefNull(encoder::HeapType::Any)],
-                    });
-                }
-                _otherwise => {
-                    for element in elements.iter().rev() {
-                        let argument =
-                            encode_expression(program, encoder, module, function, element)?;
-
-                        function.instruction(encoder::Instruction::StructNew {
-                            type_: list_type_index,
-                            args: vec![argument],
-                        });
-                    }
-                }
-            }
-
-            Ok(encoder::Instruction::Block {
-                type_: encoder::BlockType::Result(encoder::ValType::Ref(encoder::RefType {
-                    nullable: true,
-                    heap_type: encoder::HeapType::Concrete(list_type_index),
-                })),
-                code: vec![if let Some(tail) = tail {
-                    encode_expression(program, encoder, module, function, tail)?
+            Ok(elements.iter().rfold(
+                if let Some(tail) = tail {
+                    encode_expression(program, encoder, module, function, tail).unwrap()
                 } else {
                     encoder::Instruction::RefNull(encoder::HeapType::Concrete(list_type_index))
-                }],
-            })
+                },
+                |next, element| {
+                    let value =
+                        encode_expression(program, encoder, module, function, element).unwrap();
+
+                    encoder::Instruction::StructNew {
+                        type_: list_type_index,
+                        args: vec![next, value],
+                    }
+                },
+            ))
         }
         TypedExpr::Call { fun, args, .. } => {
             let call_type_index = program.resolve_type_index(encoder, &fun.type_());
@@ -780,7 +1080,7 @@ fn encode_expression(
                 let lhs = encode_expression(program, encoder, module, function, left)?;
                 let rhs = encode_expression(program, encoder, module, function, right)?;
 
-                Ok(Instruction::If {
+                Ok(encoder::Instruction::If {
                     type_: BlockType::Result(gleam_bool_type),
                     cond: Box::new(encoder::Instruction::I32Eq {
                         lhs: Box::new(encoder::Instruction::StructGet {
@@ -791,9 +1091,9 @@ fn encode_expression(
                         rhs: Box::new(encoder::Instruction::I32Const(1)),
                     }),
                     then: vec![rhs],
-                    else_: vec![Instruction::StructNew {
+                    else_: vec![encoder::Instruction::StructNew {
                         type_: gleam_bool_type_index,
-                        args: vec![Instruction::I32Const(0)],
+                        args: vec![encoder::Instruction::I32Const(0)],
                     }],
                 })
             }
@@ -804,17 +1104,19 @@ fn encode_expression(
                 let lhs = encode_expression(program, encoder, module, function, left)?;
                 let rhs = encode_expression(program, encoder, module, function, right)?;
 
-                Ok(Instruction::If {
+                Ok(encoder::Instruction::If {
                     type_: BlockType::Result(gleam_bool_type),
-                    cond: Box::new(Instruction::I32Eqz(Box::new(Instruction::StructGet {
-                        from: Box::new(lhs),
-                        type_: gleam_bool_type_index,
-                        index: 0,
-                    }))),
+                    cond: Box::new(encoder::Instruction::I32Eqz(Box::new(
+                        encoder::Instruction::StructGet {
+                            from: Box::new(lhs),
+                            type_: gleam_bool_type_index,
+                            index: 0,
+                        },
+                    ))),
                     then: vec![rhs],
-                    else_: vec![Instruction::StructNew {
+                    else_: vec![encoder::Instruction::StructNew {
                         type_: gleam_bool_type_index,
-                        args: vec![Instruction::I32Const(1)],
+                        args: vec![encoder::Instruction::I32Const(1)],
                     }],
                 })
             }
@@ -1033,9 +1335,9 @@ fn encode_expression(
                     heap_type: encoder::HeapType::Concrete(gleam_string_type),
                 });
 
-                let string = function.declare_local("_string", local_type.clone());
-                let lhs = function.declare_local("_lhs", local_type.clone());
-                let rhs = function.declare_local("_rhs", local_type.clone());
+                let string = function.declare_anonymous_local(local_type.clone());
+                let lhs = function.declare_anonymous_local(local_type.clone());
+                let rhs = function.declare_anonymous_local(local_type.clone());
 
                 Ok(encoder::Instruction::Block {
                     type_: encoder::BlockType::Result(local_type),
@@ -1052,41 +1354,47 @@ fn encode_expression(
                                 program, encoder, module, function, right,
                             )?),
                         },
-                        // Calculate the length of the new string
-                        encoder::Instruction::I32Add {
-                            lhs: Box::new(encoder::Instruction::ArrayLen(Box::new(
+                        // Create new string
+                        encoder::Instruction::LocalSet {
+                            local: string,
+                            value: Box::new(encoder::Instruction::ArrayNewDefault {
+                                type_: gleam_string_type,
+                                size: Box::new(encoder::Instruction::I32Add {
+                                    lhs: Box::new(encoder::Instruction::ArrayLen(Box::new(
+                                        encoder::Instruction::LocalGet(lhs),
+                                    ))),
+                                    rhs: Box::new(encoder::Instruction::ArrayLen(Box::new(
+                                        encoder::Instruction::LocalGet(rhs),
+                                    ))),
+                                }),
+                            }),
+                        },
+                        // Copy lhs into the new string
+                        encoder::Instruction::ArrayCopy {
+                            dst_type: gleam_string_type,
+                            dst: Box::new(encoder::Instruction::LocalGet(string)),
+                            dst_offset: Box::new(encoder::Instruction::I32Const(0)),
+                            src_type: gleam_string_type,
+                            src: Box::new(encoder::Instruction::LocalGet(lhs)),
+                            src_offset: Box::new(encoder::Instruction::I32Const(0)),
+                            size: Box::new(encoder::Instruction::ArrayLen(Box::new(
                                 encoder::Instruction::LocalGet(lhs),
                             ))),
-                            rhs: Box::new(encoder::Instruction::ArrayLen(Box::new(
+                        },
+                        // Copy rhs into the new string
+                        encoder::Instruction::ArrayCopy {
+                            dst_type: gleam_string_type,
+                            dst: Box::new(encoder::Instruction::LocalGet(string)),
+                            dst_offset: Box::new(encoder::Instruction::ArrayLen(Box::new(
+                                encoder::Instruction::LocalGet(lhs),
+                            ))),
+                            src_type: gleam_string_type,
+                            src: Box::new(encoder::Instruction::LocalGet(rhs)),
+                            src_offset: Box::new(encoder::Instruction::I32Const(0)),
+                            size: Box::new(encoder::Instruction::ArrayLen(Box::new(
                                 encoder::Instruction::LocalGet(rhs),
                             ))),
                         },
-                        // Create new string
-                        encoder::Instruction::LocalTee {
-                            local: string,
-                            value: Box::new(encoder::Instruction::ArrayNewDefault(
-                                gleam_string_type,
-                            )),
-                        },
-                        // Copy lhs into the new string
-                        encoder::Instruction::I32Const(0),
-                        encoder::Instruction::LocalGet(lhs),
-                        encoder::Instruction::I32Const(0),
-                        encoder::Instruction::ArrayLen(Box::new(encoder::Instruction::LocalGet(
-                            lhs,
-                        ))),
-                        encoder::Instruction::ArrayCopy(gleam_string_type, gleam_string_type),
-                        // Copy rhs into the new string
-                        encoder::Instruction::LocalGet(string),
-                        encoder::Instruction::ArrayLen(Box::new(encoder::Instruction::LocalGet(
-                            lhs,
-                        ))),
-                        encoder::Instruction::LocalGet(rhs),
-                        encoder::Instruction::I32Const(0),
-                        encoder::Instruction::ArrayLen(Box::new(encoder::Instruction::LocalGet(
-                            rhs,
-                        ))),
-                        encoder::Instruction::ArrayCopy(gleam_string_type, gleam_string_type),
                         // Get the string
                         encoder::Instruction::LocalGet(string),
                     ],
@@ -1099,154 +1407,58 @@ fn encode_expression(
             clauses,
             ..
         } => {
-            // Create the subject locals
+            // Declare the subject locals
             let subject_locals = subjects
                 .iter()
-                .enumerate()
-                .map(|(idx, subject)| {
-                    let subject_type = program.resolve_type(encoder, &subject.type_());
-                    function.declare_local(format!("_subject${idx}"), subject_type)
+                .map(|subject| {
+                    function
+                        .declare_anonymous_local(program.resolve_type(encoder, &subject.type_()))
                 })
                 .collect_vec();
 
             // Assign the locals
-            for (subject, local) in subjects.iter().zip(subject_locals.iter()) {
-                let value = encode_expression(program, encoder, module, function, subject)?;
+            let mut code = subjects
+                .iter()
+                .zip(subject_locals.iter())
+                .map(|(subject, local)| {
+                    let value =
+                        encode_expression(program, encoder, module, function, subject).unwrap();
 
-                function.instruction(encoder::Instruction::LocalSet {
-                    local: *local,
-                    value: Box::new(value),
-                });
-            }
+                    encoder::Instruction::LocalSet {
+                        local: *local,
+                        value: Box::new(value),
+                    }
+                })
+                .collect_vec();
 
             let block_type = encoder::BlockType::Result(program.resolve_type(encoder, typ));
 
-            Ok(clauses
-                .iter()
-                .rfold(encoder::Instruction::Unreachable, |else_, clause| {
-                    let condition = clause
-                        .pattern
-                        .iter()
-                        .zip(subject_locals.iter())
-                        .rev()
-                        .rfold(
-                            encoder::Instruction::I32Const(1),
-                            |then, (clause, subject)| {
-                                let condition = match clause {
-                                    Pattern::Int { value, .. } => {
-                                        let gleam_int_type =
-                                            program.resolve_type_index(encoder, &prelude::int());
+            code.push(
+                clauses
+                    .iter()
+                    .rfold(encoder::Instruction::Unreachable, |else_, clause| {
+                        // TODO: Bug here with patterns that return 1 but the next returns 0
 
-                                        let value = value.parse::<i64>().unwrap();
+                        let condition =
+                            encode_case_clause(program, encoder, function, clause, &subject_locals);
 
-                                        encoder::Instruction::I64Eq {
-                                            lhs: Box::new(encoder::Instruction::StructGet {
-                                                from: Box::new(encoder::Instruction::LocalGet(
-                                                    *subject,
-                                                )),
-                                                type_: gleam_int_type,
-                                                index: 0,
-                                            }),
-                                            rhs: Box::new(encoder::Instruction::I64Const(value)),
-                                        }
-                                    }
-                                    Pattern::Float { value, .. } => {
-                                        let gleam_float_type =
-                                            program.resolve_type_index(encoder, &prelude::float());
+                        let then =
+                            encode_expression(program, encoder, module, function, &clause.then)
+                                .unwrap();
 
-                                        let value = value.parse::<f64>().unwrap();
+                        encoder::Instruction::If {
+                            type_: block_type.clone(),
+                            cond: Box::new(condition),
+                            then: vec![then],
+                            else_: vec![else_],
+                        }
+                    }),
+            );
 
-                                        encoder::Instruction::F64Eq {
-                                            lhs: Box::new(encoder::Instruction::StructGet {
-                                                from: Box::new(encoder::Instruction::LocalGet(
-                                                    *subject,
-                                                )),
-                                                type_: gleam_float_type,
-                                                index: 0,
-                                            }),
-                                            rhs: Box::new(encoder::Instruction::F64Const(value)),
-                                        }
-                                    }
-                                    Pattern::Discard { .. } => encoder::Instruction::I32Const(1),
-                                    Pattern::Constructor { name, type_, .. } => {
-                                        let type_index = program.resolve_type_index(encoder, type_);
-                                        let tag = program
-                                            .resolve_type_variant_tag(type_index, name.clone());
-
-                                        encoder::Instruction::I32Eq {
-                                            lhs: Box::new(encoder::Instruction::StructGet {
-                                                from: Box::new(encoder::Instruction::LocalGet(
-                                                    *subject,
-                                                )),
-                                                type_: type_index,
-                                                index: 0,
-                                            }),
-                                            rhs: Box::new(encoder::Instruction::I32Const(tag)),
-                                        }
-                                    }
-                                    Pattern::String { value, .. } => encoder::Instruction::If {
-                                        type_: encoder::BlockType::Result(encoder::ValType::I32),
-                                        cond: Box::new(encoder::Instruction::I32Eq {
-                                            lhs: Box::new(encoder::Instruction::ArrayLen(
-                                                Box::new(encoder::Instruction::LocalGet(*subject)),
-                                            )),
-                                            rhs: Box::new(encoder::Instruction::I32Const(
-                                                value.len().try_into().unwrap(),
-                                            )),
-                                        }),
-                                        then: vec![value.bytes().enumerate().rev().fold(
-                                            encoder::Instruction::I32Const(1),
-                                            |then, (idx, byte)| encoder::Instruction::If {
-                                                type_: encoder::BlockType::Result(
-                                                    encoder::ValType::I32,
-                                                ),
-                                                cond: Box::new(encoder::Instruction::I32Eq {
-                                                    lhs: Box::new(
-                                                        encoder::Instruction::ArrayGetU {
-                                                            array: Box::new(
-                                                                encoder::Instruction::LocalGet(
-                                                                    *subject,
-                                                                ),
-                                                            ),
-                                                            index: idx.try_into().unwrap(),
-                                                            type_: program.resolve_type_index(
-                                                                encoder,
-                                                                &prelude::string(),
-                                                            ),
-                                                        },
-                                                    ),
-                                                    rhs: Box::new(encoder::Instruction::I32Const(
-                                                        byte as i32,
-                                                    )),
-                                                }),
-                                                then: vec![then],
-                                                else_: vec![encoder::Instruction::I32Const(0)],
-                                            },
-                                        )],
-                                        else_: vec![encoder::Instruction::I32Const(0)],
-                                    },
-                                    _ => todo!("{:?}", clause),
-                                };
-
-                                encoder::Instruction::If {
-                                    type_: encoder::BlockType::Result(encoder::ValType::I32),
-                                    cond: Box::new(condition),
-                                    then: vec![then],
-                                    else_: vec![encoder::Instruction::I32Const(0)],
-                                }
-                            },
-                        );
-
-                    let then = encode_expression(program, encoder, module, function, &clause.then)
-                        .unwrap();
-
-                    encoder::Instruction::If {
-                        type_: block_type.clone(),
-                        cond: Box::new(condition),
-                        then: vec![then],
-                        else_: vec![else_],
-                    }
-                }))
+            Ok(encoder::Instruction::Block {
+                type_: block_type.clone(),
+                code,
+            })
         }
         TypedExpr::RecordAccess { index, record, .. } => {
             let heap_type = program.resolve_type_index(encoder, &record.type_());

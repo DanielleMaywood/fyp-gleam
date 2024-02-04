@@ -16,7 +16,7 @@ pub struct Function {
     name: EcoString,
     linkage: FunctionLinkage,
     instructions: Vec<Instruction>,
-    local_count: u32,
+    pub local_count: u32,
     local_map: im::HashMap<EcoString, Index<Local>>,
     locals: Vec<ValType>,
 }
@@ -55,7 +55,15 @@ impl Function {
         }
     }
 
-    pub fn declare_local(&mut self, name: impl Into<EcoString>, type_: ValType) -> Index<Local> {
+    pub fn declare_anonymous_local(&mut self, type_: ValType) -> Index<Local> {
+        self.declare_local(format!("_anon${}", self.local_count), type_)
+    }
+
+    pub fn declare_local(
+        &mut self,
+        name: impl Into<EcoString> + std::fmt::Debug,
+        type_: ValType,
+    ) -> Index<Local> {
         let index = Index::new(self.local_count);
         self.local_count += 1;
         self.locals.push(type_);
