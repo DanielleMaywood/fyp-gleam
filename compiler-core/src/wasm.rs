@@ -1051,7 +1051,78 @@ fn encode_expression(
                 }
             }
         },
-        TypedExpr::Fn { .. } => todo!(),
+        TypedExpr::Fn {
+            is_capture: true, ..
+        } => todo!(),
+        TypedExpr::Fn {
+            is_capture: false,
+            location,
+            args,
+            body,
+            typ,
+            ..
+        } => {
+            let Type::Fn {
+                args: parameters,
+                retrn: return_type,
+            } = typ.as_ref()
+            else {
+                panic!("invalid")
+            };
+
+            let lambda_type_index = encoder.declare_type();
+            let lambda_type = encoder::Type::Function {
+                params: parameters
+                    .iter()
+                    .map(|parameter| program.resolve_type(encoder, parameter))
+                    .collect_vec(),
+                results: vec![program.resolve_type(encoder, return_type)],
+            };
+
+            encoder.define_type(lambda_type_index, lambda_type);
+
+            let lambda_index = encoder.declare_function();
+            let lambda = {
+                let mut lambda = encoder::Function::new(
+                    lambda_index,
+                    lambda_type_index,
+                    format!("{:?}", location).into(),
+                    encoder::FunctionLinkage::Export,
+                    args.iter()
+                        .map(|arg| match &arg.names {
+                            ArgNames::Discard { .. } | ArgNames::LabelledDiscard { .. } => None,
+                            ArgNames::Named { name } | ArgNames::NamedLabelled { name, .. } => {
+                                Some(name.clone())
+                            }
+                        })
+                        .collect_vec(),
+                );
+
+                for (idx, statement) in body.iter().enumerate() {
+                    let statement = encode_statement(
+                        program,
+                        encoder,
+                        module,
+                        &mut lambda,
+                        statement,
+                        if idx == body.len() - 1 {
+                            KeepOrDrop::Keep
+                        } else {
+                            KeepOrDrop::Drop
+                        },
+                    )?;
+
+                    lambda.instruction(statement);
+                }
+
+                lambda.instruction(encoder::Instruction::End);
+                lambda
+            };
+
+            encoder.define_function(lambda_index, lambda);
+
+            Ok(encoder::Instruction::RefFunc(lambda_index))
+        }
         TypedExpr::List { elements, tail, .. } => {
             let list_type_index = program.resolve_type_index_by_name("gleam".into(), "List".into());
 

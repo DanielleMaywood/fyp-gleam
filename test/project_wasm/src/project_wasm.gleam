@@ -100,7 +100,7 @@ pub fn main() {
     _ -> 0
   }
 
-  case #(1, [2, 3]) {
+  let _ = case #(1, [2, 3]) {
     #(1, [_, _] as rest) -> {
       case rest {
         [2, 3] -> 2
@@ -109,4 +109,7 @@ pub fn main() {
     }
     _ -> 0
   }
+
+  let lambda = fn(x) { x * 2 }
+  lambda(5)
 }
