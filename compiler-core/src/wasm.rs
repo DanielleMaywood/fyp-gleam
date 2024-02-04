@@ -731,7 +731,25 @@ fn encode_case_pattern(
             }
         }
         Pattern::VarUsage { .. } => todo!(),
-        Pattern::Assign { .. } => todo!(),
+        Pattern::Assign { name, pattern, .. } => {
+            let local_type = program.resolve_type(encoder, &pattern.type_());
+            let local = function.declare_local(name.clone(), local_type);
+
+            encoder::Instruction::If {
+                type_: encoder::BlockType::Result(encoder::ValType::I32),
+                cond: Box::new(encode_case_pattern(
+                    program, encoder, function, pattern, subject,
+                )),
+                then: vec![
+                    encoder::Instruction::LocalSet {
+                        local,
+                        value: Box::new(encoder::Instruction::LocalGet(subject)),
+                    },
+                    encoder::Instruction::I32Const(1),
+                ],
+                else_: vec![encoder::Instruction::I32Const(0)],
+            }
+        }
         Pattern::Discard { .. } => encoder::Instruction::I32Const(1),
         Pattern::List {
             location,
