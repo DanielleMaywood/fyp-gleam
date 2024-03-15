@@ -1,14 +1,12 @@
-use crate::wasm::encoder::Index;
 use crate::{
-    type_::{Type, TypeVar},
-    wasm::encoder,
+    type_::{prelude::PreludeType, Type, TypeVar},
+    wasm::encoder::{self, Index},
 };
 use ecow::EcoString;
 use im::HashMap;
 use itertools::Itertools;
 use std::ops::Deref;
 
-pub mod prelude;
 pub mod runtime;
 
 type TypeIndexCache<T> = HashMap<T, Index<encoder::Type>>;
@@ -18,7 +16,6 @@ pub struct Program {
     type_indices: TypeIndexCache<(EcoString, EcoString)>,
     type_equality_indices: HashMap<Index<encoder::Type>, Index<encoder::Function>>,
     type_variant_tags: HashMap<(Index<encoder::Type>, EcoString), i32>,
-    function_type_indices_cache: TypeIndexCache<(Vec<Index<encoder::Type>>, Index<encoder::Type>)>,
     tuple_type_indices_cache: TypeIndexCache<Vec<Index<encoder::Type>>>,
     function_indices: HashMap<(EcoString, EcoString), Index<encoder::Function>>,
 }
@@ -110,6 +107,17 @@ impl Program {
         }
     }
 
+    pub fn resolve_prelude_type_index(&self, type_: PreludeType) -> Index<encoder::Type> {
+        self.resolve_type_index_by_name(runtime::PRELUDE_MODULE.into(), type_.name().into())
+    }
+
+    pub fn resolve_prelude_type(&self, type_: PreludeType) -> encoder::ValType {
+        encoder::ValType::Ref(encoder::RefType {
+            nullable: true,
+            heap_type: encoder::HeapType::Concrete(self.resolve_prelude_type_index(type_)),
+        })
+    }
+
     pub fn resolve_type_index(
         &mut self,
         encoder: &mut encoder::Module,
@@ -119,37 +127,7 @@ impl Program {
             Type::Named { module, name, .. } => {
                 self.resolve_type_index_by_name(module.clone(), name.clone())
             }
-            Type::Fn { args, retrn, .. } => {
-                let arg_indices = args
-                    .iter()
-                    .map(|arg| self.resolve_type_index(encoder, arg))
-                    .collect_vec();
-
-                let return_index = self.resolve_type_index(encoder, &retrn);
-
-                // TODO: This is only required in `or_insert_with`, however,
-                //       due to lifetime rules, we cannot call `resolve_type`.
-                //       In the future it might be worth revisiting this
-                //       in case of any performance issues.
-                let fn_type = encoder::Type::Function {
-                    params: args
-                        .iter()
-                        .map(|arg| self.resolve_type(encoder, &arg))
-                        .collect_vec(),
-                    results: vec![self.resolve_type(encoder, retrn)],
-                };
-
-                *self
-                    .function_type_indices_cache
-                    .entry((arg_indices, return_index))
-                    .or_insert_with(|| {
-                        let fn_type_index = encoder.declare_type();
-
-                        encoder.define_type(fn_type_index, fn_type);
-
-                        fn_type_index
-                    })
-            }
+            Type::Fn { .. } => runtime::closure_type_index(self),
             Type::Var { type_ } => match type_.borrow().deref() {
                 TypeVar::Unbound { .. } => unimplemented!(),
                 TypeVar::Link { type_ } => self.resolve_type_index(encoder, type_),

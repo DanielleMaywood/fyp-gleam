@@ -1,22 +1,25 @@
 use std::sync::Arc;
 
 use ecow::EcoString;
+use im::HashSet;
 use itertools::Itertools;
+use vec1::Vec1;
 
 use crate::{
     ast::{
-        self, ArgNames, AssignName, BinOp, Clause, Constant, CustomType, Pattern, TypedAssignment,
-        TypedExpr, TypedFunction, TypedStatement,
+        Arg, ArgNames, AssignName, BinOp, Clause, Constant, CustomType, Definition, Pattern,
+        Statement, TypedAssignment, TypedExpr, TypedFunction, TypedPattern, TypedStatement,
     },
     build::Module,
     error::Result,
-    type_::{prelude, ModuleValueConstructor, Type, ValueConstructorVariant},
-    wasm::program::Program,
-};
-
-use self::{
-    encoder::{BlockType, Index, Local},
-    program::runtime::string_compare,
+    type_::{prelude::PreludeType, ModuleValueConstructor, Type, ValueConstructorVariant},
+    wasm::{
+        encoder::{BlockType, Index, Local},
+        program::{
+            runtime::{self, string_compare},
+            Program,
+        },
+    },
 };
 
 mod encoder;
@@ -26,7 +29,7 @@ pub fn program(modules: &[Module]) -> Result<Vec<u8>> {
     let mut program = Program::default();
     let mut encoder = encoder::Module::default();
 
-    program::prelude::register(&mut program, &mut encoder);
+    runtime::register(&mut program, &mut encoder);
 
     for module in modules {
         encode_module_declarations(&mut program, &mut encoder, module)?;
@@ -228,11 +231,18 @@ fn encode_custom_type_definition(
 
         let constructor_function_type_index = encoder.declare_type();
         let constructor_function_type = encoder::Type::Function {
-            params: constructor
-                .arguments
-                .iter()
-                .map(|argument| program.resolve_type(encoder, &argument.type_))
-                .collect_vec(),
+            params: {
+                let mut params = constructor
+                    .arguments
+                    .iter()
+                    .map(|argument| program.resolve_type(encoder, &argument.type_))
+                    .collect_vec();
+                params.push(encoder::ValType::Ref(encoder::RefType {
+                    nullable: true,
+                    heap_type: encoder::HeapType::Struct,
+                }));
+                params
+            },
             results: vec![encoder::ValType::Ref(encoder::RefType {
                 nullable: true,
                 heap_type: encoder::HeapType::Concrete(parent_type_index),
@@ -257,7 +267,11 @@ fn encode_custom_type_definition(
                 constructor_function_type_index,
                 EcoString::from(format!("{}/{}", module.ast.name, constructor.name)),
                 encoder::FunctionLinkage::Export,
-                arguments,
+                {
+                    let mut arguments = arguments;
+                    arguments.push(None);
+                    arguments
+                },
             );
 
             let constructor_tag =
@@ -456,11 +470,20 @@ fn encode_function_definition(
 ) -> Result<()> {
     let function_type_index = encoder.declare_type();
     let function_type = encoder::Type::Function {
-        params: the_function
-            .arguments
-            .iter()
-            .map(|param| program.resolve_type(encoder, &param.type_))
-            .collect_vec(),
+        params: {
+            let mut params = the_function
+                .arguments
+                .iter()
+                .map(|param| program.resolve_type(encoder, &param.type_))
+                .collect_vec();
+            if the_function.name != "main" {
+                params.push(encoder::ValType::Ref(encoder::RefType {
+                    nullable: true,
+                    heap_type: encoder::HeapType::Struct,
+                }));
+            }
+            params
+        },
         results: vec![program.resolve_type(encoder, &the_function.return_type)],
     };
 
@@ -474,34 +497,25 @@ fn encode_function_definition(
         function_type_index,
         EcoString::from(format!("{}/{}", module.ast.name, the_function.name)),
         encoder::FunctionLinkage::Export,
-        the_function
-            .arguments
-            .iter()
-            .map(|argument| match &argument.names {
-                ArgNames::Discard { .. } | ArgNames::LabelledDiscard { .. } => None,
-                ArgNames::Named { name } | ArgNames::NamedLabelled { name, .. } => {
-                    Some(name.clone())
-                }
-            })
-            .collect_vec(),
+        {
+            let mut arguments = the_function
+                .arguments
+                .iter()
+                .map(|argument| match &argument.names {
+                    ArgNames::Discard { .. } | ArgNames::LabelledDiscard { .. } => None,
+                    ArgNames::Named { name } | ArgNames::NamedLabelled { name, .. } => {
+                        Some(name.clone())
+                    }
+                })
+                .collect_vec();
+            if the_function.name != "main" {
+                arguments.push(None);
+            }
+            arguments
+        },
     );
 
-    for (statement_index, statement) in the_function.body.iter().enumerate() {
-        let keep_or_drop = if statement_index == the_function.body.len() - 1 {
-            KeepOrDrop::Keep
-        } else {
-            KeepOrDrop::Drop
-        };
-
-        let instruction = encode_statement(
-            program,
-            encoder,
-            module,
-            &mut function,
-            statement,
-            keep_or_drop,
-        )?;
-
+    for instruction in encode_block(program, encoder, module, &mut function, &the_function.body)? {
         function.instruction(instruction);
     }
 
@@ -517,6 +531,32 @@ enum KeepOrDrop {
     Drop,
 }
 
+fn encode_block(
+    program: &mut Program,
+    encoder: &mut encoder::Module,
+    module: &Module,
+    function: &mut encoder::Function,
+    body: &Vec1<TypedStatement>,
+) -> Result<Vec<encoder::Instruction>> {
+    body.iter()
+        .enumerate()
+        .map(|(statement_index, statement)| {
+            encode_statement(
+                program,
+                encoder,
+                module,
+                function,
+                statement,
+                if statement_index == body.len() - 1 {
+                    KeepOrDrop::Keep
+                } else {
+                    KeepOrDrop::Drop
+                },
+            )
+        })
+        .collect()
+}
+
 fn encode_statement(
     program: &mut Program,
     encoder: &mut encoder::Module,
@@ -526,13 +566,13 @@ fn encode_statement(
     keep_or_drop: KeepOrDrop,
 ) -> Result<encoder::Instruction> {
     let instruction = match statement {
-        TypedStatement::Expression(expression) => {
+        Statement::Expression(expression) => {
             encode_expression(program, encoder, module, function, expression)
         }
-        TypedStatement::Assignment(assignment) => {
+        Statement::Assignment(assignment) => {
             encode_assignment(program, encoder, module, function, assignment)
         }
-        TypedStatement::Use(_) => todo!(),
+        Statement::Use(_) => todo!(),
     }?;
 
     Ok(match keep_or_drop {
@@ -553,18 +593,14 @@ fn encode_assignment(
         Pattern::Float { .. } => todo!(),
         Pattern::String { .. } => todo!(),
         Pattern::Variable { name, .. } => {
+            let value = encode_expression(program, encoder, module, function, &assignment.value)?;
+
             let local_type = program.resolve_type(encoder, &assignment.value.type_());
-            let local_index = function.declare_local(name.clone(), local_type.clone());
+            let local_index = function.declare_local(name.clone(), local_type);
 
             Ok(encoder::Instruction::LocalTee {
                 local: local_index,
-                value: Box::new(encode_expression(
-                    program,
-                    encoder,
-                    module,
-                    function,
-                    &assignment.value,
-                )?),
+                value: Box::new(value),
             })
         }
         Pattern::VarUsage { .. } => todo!(),
@@ -581,21 +617,15 @@ fn encode_assignment(
 }
 
 fn encode_int(program: &mut Program, value: i64) -> Result<encoder::Instruction> {
-    let gleam_int_constructor_index =
-        program.resolve_function_index_by_name("gleam".into(), "Int".into());
-
     Ok(encoder::Instruction::Call {
-        func: gleam_int_constructor_index,
+        func: runtime::int_constructor(program),
         args: vec![encoder::Instruction::I64Const(value)],
     })
 }
 
 fn encode_float(program: &mut Program, value: f64) -> Result<encoder::Instruction> {
-    let gleam_float_constructor_index =
-        program.resolve_function_index_by_name("gleam".into(), "Float".into());
-
     Ok(encoder::Instruction::Call {
-        func: gleam_float_constructor_index,
+        func: runtime::float_constructor(program),
         args: vec![encoder::Instruction::F64Const(value)],
     })
 }
@@ -605,7 +635,7 @@ fn encode_string(
     encoder: &mut encoder::Module,
     value: &EcoString,
 ) -> Result<encoder::Instruction> {
-    let string_type_index = program.resolve_type_index(encoder, &prelude::string());
+    let string_type_index = program.resolve_prelude_type_index(PreludeType::String);
 
     let string_data_index = encoder.declare_data();
     let string_data = encoder::Data::new(value.bytes().collect_vec());
@@ -658,28 +688,28 @@ fn encode_case_pattern(
 ) -> encoder::Instruction {
     match pattern {
         Pattern::Int { value, .. } => {
-            let gleam_int_type = program.resolve_type_index(encoder, &prelude::int());
+            let int_type_index = program.resolve_prelude_type_index(PreludeType::Int);
 
             let value = value.parse::<i64>().unwrap();
 
             encoder::Instruction::I64Eq {
                 lhs: Box::new(encoder::Instruction::StructGet {
                     from: Box::new(encoder::Instruction::LocalGet(subject)),
-                    type_: gleam_int_type,
+                    type_: int_type_index,
                     index: 0,
                 }),
                 rhs: Box::new(encoder::Instruction::I64Const(value)),
             }
         }
         Pattern::Float { value, .. } => {
-            let gleam_float_type = program.resolve_type_index(encoder, &prelude::float());
+            let float_type_index = program.resolve_prelude_type_index(PreludeType::Float);
 
             let value = value.parse::<f64>().unwrap();
 
             encoder::Instruction::F64Eq {
                 lhs: Box::new(encoder::Instruction::StructGet {
                     from: Box::new(encoder::Instruction::LocalGet(subject)),
-                    type_: gleam_float_type,
+                    type_: float_type_index,
                     index: 0,
                 }),
                 rhs: Box::new(encoder::Instruction::F64Const(value)),
@@ -748,7 +778,7 @@ fn encode_case_pattern(
             tail,
             type_,
         } => {
-            let list_type_index = program.resolve_type_index_by_name("gleam".into(), "List".into());
+            let list_type_index = runtime::list_type_index(program);
 
             match elements.as_slice() {
                 [] => match tail {
@@ -889,12 +919,12 @@ fn encode_case_pattern(
                 )),
                 then: match right_side_assignment {
                     AssignName::Variable(name) => {
-                        let gleam_string_type =
-                            program.resolve_type_index(encoder, &prelude::string());
+                        let string_type_index =
+                            program.resolve_prelude_type_index(PreludeType::String);
 
                         let local = function.declare_local(
                             name.clone(),
-                            program.resolve_type(encoder, &prelude::string()),
+                            program.resolve_prelude_type(PreludeType::String),
                         );
 
                         let string_offset = left_side_string.len().try_into().unwrap();
@@ -909,15 +939,15 @@ fn encode_case_pattern(
                             encoder::Instruction::LocalSet {
                                 local,
                                 value: Box::new(encoder::Instruction::ArrayNewDefault {
-                                    type_: gleam_string_type,
+                                    type_: string_type_index,
                                     size: Box::new(string_length.clone()),
                                 }),
                             },
                             encoder::Instruction::ArrayCopy {
-                                dst_type: gleam_string_type,
+                                dst_type: string_type_index,
                                 dst: Box::new(encoder::Instruction::LocalGet(local)),
                                 dst_offset: Box::new(encoder::Instruction::I32Const(0)),
-                                src_type: gleam_string_type,
+                                src_type: string_type_index,
                                 src: Box::new(encoder::Instruction::LocalGet(subject)),
                                 src_offset: Box::new(encoder::Instruction::I32Const(string_offset)),
                                 size: Box::new(string_length),
@@ -957,29 +987,11 @@ fn encode_expression(
         TypedExpr::String { value, .. } => encode_string(program, encoder, value),
         TypedExpr::Block { statements, .. } => {
             let block_type = program.resolve_type(encoder, &expression.type_());
-
-            let statements = statements
-                .iter()
-                .enumerate()
-                .map(|(statement_index, statement)| {
-                    encode_statement(
-                        program,
-                        encoder,
-                        module,
-                        function,
-                        statement,
-                        if statement_index == statements.len() - 1 {
-                            KeepOrDrop::Keep
-                        } else {
-                            KeepOrDrop::Drop
-                        },
-                    )
-                })
-                .collect::<Result<Vec<_>, _>>()?;
+            let block = encode_block(program, encoder, module, function, statements)?;
 
             Ok(encoder::Instruction::Block {
                 type_: encoder::BlockType::Result(block_type),
-                code: statements,
+                code: block,
             })
         }
         TypedExpr::Pipeline {
@@ -993,11 +1005,11 @@ fn encode_expression(
                 .iter()
                 .map(|assignment| {
                     let assignment =
-                        encode_assignment(program, encoder, module, function, assignment).unwrap();
+                        encode_assignment(program, encoder, module, function, assignment)?;
 
-                    encoder::Instruction::Drop(Box::new(assignment))
+                    Ok(encoder::Instruction::Drop(Box::new(assignment)))
                 })
-                .collect::<Vec<_>>();
+                .collect::<Result<Vec<_>>>()?;
 
             statements.push(encode_expression(
                 program, encoder, module, function, finally,
@@ -1039,7 +1051,19 @@ fn encode_expression(
                 let function_index =
                     program.resolve_function_index_by_name(module.clone(), name.clone());
 
-                Ok(encoder::Instruction::RefFunc(function_index))
+                let closure_type_index = program::runtime::closure_type_index(program);
+                let unit_type_index = program::runtime::unit_type_index(program);
+
+                Ok(encoder::Instruction::StructNew {
+                    type_: closure_type_index,
+                    args: vec![
+                        encoder::Instruction::RefFunc(function_index),
+                        encoder::Instruction::StructNew {
+                            type_: unit_type_index,
+                            args: vec![],
+                        },
+                    ],
+                })
             }
             ValueConstructorVariant::Record {
                 arity,
@@ -1049,13 +1073,30 @@ fn encode_expression(
             } => {
                 let function_index =
                     program.resolve_function_index_by_name(module.clone(), name.clone());
+                let unit_type_index = program::runtime::unit_type_index(program);
 
                 match arity {
                     0 => Ok(encoder::Instruction::Call {
                         func: function_index,
-                        args: vec![],
+                        args: vec![encoder::Instruction::StructNew {
+                            type_: unit_type_index,
+                            args: vec![],
+                        }],
                     }),
-                    _ => Ok(encoder::Instruction::RefFunc(function_index)),
+                    _ => {
+                        let closure_type_index = program::runtime::closure_type_index(program);
+
+                        Ok(encoder::Instruction::StructNew {
+                            type_: closure_type_index,
+                            args: vec![
+                                encoder::Instruction::RefFunc(function_index),
+                                encoder::Instruction::StructNew {
+                                    type_: unit_type_index,
+                                    args: vec![],
+                                },
+                            ],
+                        })
+                    }
                 }
             }
         },
@@ -1078,61 +1119,129 @@ fn encode_expression(
                 panic!("invalid")
             };
 
-            let lambda_type_index = encoder.declare_type();
-            let lambda_type = encoder::Type::Function {
-                params: parameters
+            // Collect all variables captured by this closure
+            let captured_variables = collect_captured_variables(args, body);
+            let captured = captured_variables
+                .iter()
+                .map(|variable| function.get_local_type(variable.clone()).clone())
+                .collect_vec();
+
+            // Create a struct containing all the captured variables.
+            let captured_struct_type_index = encoder.declare_type();
+            let captured_struct_type = encoder::Type::Struct {
+                fields: captured
                     .iter()
-                    .map(|parameter| program.resolve_type(encoder, parameter))
+                    .map(|captured_type| encoder::FieldType {
+                        element_type: encoder::StorageType::Val(captured_type.clone()),
+                        mutable: true,
+                    })
                     .collect_vec(),
+            };
+
+            encoder.define_type(captured_struct_type_index, captured_struct_type);
+
+            let closure_struct_type_index = program::runtime::closure_type_index(program);
+
+            // Create the type of this closure.
+            let closure_type_index = encoder.declare_type();
+
+            let mut lambda_parameters = parameters
+                .iter()
+                .map(|parameter| program.resolve_type(encoder, parameter))
+                .collect_vec();
+
+            lambda_parameters.push(encoder::ValType::Ref(encoder::RefType {
+                nullable: true,
+                heap_type: encoder::HeapType::Struct,
+            }));
+
+            let lambda_type = encoder::Type::Function {
+                params: lambda_parameters,
                 results: vec![program.resolve_type(encoder, return_type)],
             };
 
-            encoder.define_type(lambda_type_index, lambda_type);
+            encoder.define_type(closure_type_index, lambda_type);
 
-            let lambda_index = encoder.declare_function();
-            let lambda = {
+            // Create the closure
+            let closure_index = encoder.declare_function();
+            let closure = {
+                let mut arguments = args
+                    .iter()
+                    .map(|arg| match &arg.names {
+                        ArgNames::Discard { .. } | ArgNames::LabelledDiscard { .. } => None,
+                        ArgNames::Named { name } | ArgNames::NamedLabelled { name, .. } => {
+                            Some(name.clone())
+                        }
+                    })
+                    .collect_vec();
+
+                arguments.push(Some("_ctx".into()));
+
                 let mut lambda = encoder::Function::new(
-                    lambda_index,
-                    lambda_type_index,
+                    closure_index,
+                    closure_type_index,
                     format!("{:?}", location).into(),
                     encoder::FunctionLinkage::Export,
-                    args.iter()
-                        .map(|arg| match &arg.names {
-                            ArgNames::Discard { .. } | ArgNames::LabelledDiscard { .. } => None,
-                            ArgNames::Named { name } | ArgNames::NamedLabelled { name, .. } => {
-                                Some(name.clone())
-                            }
-                        })
-                        .collect_vec(),
+                    arguments,
                 );
 
-                for (idx, statement) in body.iter().enumerate() {
-                    let statement = encode_statement(
-                        program,
-                        encoder,
-                        module,
-                        &mut lambda,
-                        statement,
-                        if idx == body.len() - 1 {
-                            KeepOrDrop::Keep
-                        } else {
-                            KeepOrDrop::Drop
-                        },
-                    )?;
+                let context = lambda.get_local_index("_ctx".into());
 
-                    lambda.instruction(statement);
+                // Pull out all the captured variables into their own locals
+                for (index, (name, type_)) in
+                    captured_variables.iter().zip(captured.iter()).enumerate()
+                {
+                    let local = lambda.declare_local(name.clone(), type_.clone());
+
+                    lambda.instruction(encoder::Instruction::LocalSet {
+                        local,
+                        value: Box::new(encoder::Instruction::StructGet {
+                            from: Box::new(encoder::Instruction::RefCast {
+                                value: Box::new(encoder::Instruction::LocalGet(context)),
+                                type_: encoder::RefType {
+                                    nullable: true,
+                                    heap_type: encoder::HeapType::Concrete(
+                                        captured_struct_type_index,
+                                    ),
+                                },
+                            }),
+                            type_: captured_struct_type_index,
+                            index: index.try_into().unwrap(),
+                        }),
+                    });
+                }
+
+                // Generate the body of the closure
+                for instruction in encode_block(program, encoder, module, &mut lambda, body)? {
+                    lambda.instruction(instruction);
                 }
 
                 lambda.instruction(encoder::Instruction::End);
                 lambda
             };
 
-            encoder.define_function(lambda_index, lambda);
+            encoder.define_function(closure_index, closure);
 
-            Ok(encoder::Instruction::RefFunc(lambda_index))
+            Ok(encoder::Instruction::StructNew {
+                type_: closure_struct_type_index,
+                args: vec![
+                    encoder::Instruction::RefFunc(closure_index),
+                    encoder::Instruction::StructNew {
+                        type_: captured_struct_type_index,
+                        args: captured_variables
+                            .iter()
+                            .map(|variable| {
+                                encoder::Instruction::LocalGet(
+                                    function.get_local_index(variable.clone()),
+                                )
+                            })
+                            .collect_vec(),
+                    },
+                ],
+            })
         }
         TypedExpr::List { elements, tail, .. } => {
-            let list_type_index = program.resolve_type_index_by_name("gleam".into(), "List".into());
+            let list_type_index = runtime::list_type_index(program);
 
             Ok(elements.iter().rfold(
                 if let Some(tail) = tail {
@@ -1152,77 +1261,129 @@ fn encode_expression(
             ))
         }
         TypedExpr::Call { fun, args, .. } => {
-            let call_type_index = program.resolve_type_index(encoder, &fun.type_());
+            let type_ = program.resolve_type(encoder, &expression.type_());
+
+            let closure_type_index = encoder.declare_type();
+            let closure_type = encoder::Type::Function {
+                params: {
+                    let mut params = args
+                        .iter()
+                        .map(|arg| program.resolve_type(encoder, &arg.value.type_()))
+                        .collect_vec();
+                    params.push(encoder::ValType::Ref(encoder::RefType {
+                        nullable: true,
+                        heap_type: encoder::HeapType::Struct,
+                    }));
+                    params
+                },
+                results: vec![type_.clone()],
+            };
+
+            encoder.define_type(closure_type_index, closure_type);
 
             let arguments = args
                 .into_iter()
                 .map(|arg| encode_expression(program, encoder, module, function, &arg.value))
                 .collect::<Result<Vec<_>, _>>()?;
 
-            let func_ref = encode_expression(program, encoder, module, function, &fun)?;
+            let closure_struct_type_index = program::runtime::closure_type_index(program);
 
-            Ok(encoder::Instruction::CallRef {
-                type_: call_type_index,
-                ref_: Box::new(func_ref),
-                args: arguments,
+            let func_ref = encode_expression(program, encoder, module, function, &fun)?;
+            let func_ref_local =
+                function.declare_anonymous_local(encoder::ValType::Ref(encoder::RefType {
+                    nullable: true,
+                    heap_type: encoder::HeapType::Concrete(closure_struct_type_index),
+                }));
+
+            Ok(encoder::Instruction::Block {
+                type_: encoder::BlockType::Result(type_),
+                code: vec![
+                    encoder::Instruction::LocalSet {
+                        local: func_ref_local,
+                        value: Box::new(func_ref),
+                    },
+                    encoder::Instruction::CallRef {
+                        type_: closure_type_index,
+                        ref_: Box::new(encoder::Instruction::RefCast {
+                            value: Box::new(encoder::Instruction::StructGet {
+                                from: Box::new(encoder::Instruction::LocalGet(func_ref_local)),
+                                type_: closure_struct_type_index,
+                                index: 0,
+                            }),
+                            type_: encoder::RefType {
+                                nullable: true,
+                                heap_type: encoder::HeapType::Concrete(closure_type_index),
+                            },
+                        }),
+                        args: {
+                            let mut args = arguments;
+                            args.push(encoder::Instruction::StructGet {
+                                from: Box::new(encoder::Instruction::LocalGet(func_ref_local)),
+                                type_: closure_struct_type_index,
+                                index: 1,
+                            });
+                            args
+                        },
+                    },
+                ],
             })
         }
         TypedExpr::BinOp {
             name, left, right, ..
         } => match name {
             BinOp::And => {
-                let gleam_bool_type_index = program.resolve_type_index(encoder, &prelude::bool());
-                let gleam_bool_type = program.resolve_type(encoder, &prelude::bool());
+                let bool_type_index = program.resolve_prelude_type_index(PreludeType::Bool);
+                let bool_type = program.resolve_prelude_type(PreludeType::Bool);
 
                 let lhs = encode_expression(program, encoder, module, function, left)?;
                 let rhs = encode_expression(program, encoder, module, function, right)?;
 
                 Ok(encoder::Instruction::If {
-                    type_: BlockType::Result(gleam_bool_type),
+                    type_: BlockType::Result(bool_type),
                     cond: Box::new(encoder::Instruction::I32Eq {
                         lhs: Box::new(encoder::Instruction::StructGet {
                             from: Box::new(lhs),
-                            type_: gleam_bool_type_index,
+                            type_: bool_type_index,
                             index: 0,
                         }),
                         rhs: Box::new(encoder::Instruction::I32Const(1)),
                     }),
                     then: vec![rhs],
                     else_: vec![encoder::Instruction::StructNew {
-                        type_: gleam_bool_type_index,
+                        type_: bool_type_index,
                         args: vec![encoder::Instruction::I32Const(0)],
                     }],
                 })
             }
             BinOp::Or => {
-                let gleam_bool_type_index = program.resolve_type_index(encoder, &prelude::bool());
-                let gleam_bool_type = program.resolve_type(encoder, &prelude::bool());
+                let bool_type_index = program.resolve_prelude_type_index(PreludeType::Bool);
+                let bool_type = program.resolve_prelude_type(PreludeType::Bool);
 
                 let lhs = encode_expression(program, encoder, module, function, left)?;
                 let rhs = encode_expression(program, encoder, module, function, right)?;
 
                 Ok(encoder::Instruction::If {
-                    type_: BlockType::Result(gleam_bool_type),
+                    type_: BlockType::Result(bool_type),
                     cond: Box::new(encoder::Instruction::I32Eqz(Box::new(
                         encoder::Instruction::StructGet {
                             from: Box::new(lhs),
-                            type_: gleam_bool_type_index,
+                            type_: bool_type_index,
                             index: 0,
                         },
                     ))),
                     then: vec![rhs],
                     else_: vec![encoder::Instruction::StructNew {
-                        type_: gleam_bool_type_index,
+                        type_: bool_type_index,
                         args: vec![encoder::Instruction::I32Const(1)],
                     }],
                 })
             }
             BinOp::Eq => {
-                let gleam_bool_type_index = program.resolve_type_index(encoder, &prelude::bool());
+                let bool_type_index = program.resolve_prelude_type_index(PreludeType::Bool);
                 let type_index = program.resolve_type_index(encoder, &left.type_());
 
                 Ok(encoder::Instruction::StructNew {
-                    type_: gleam_bool_type_index,
+                    type_: bool_type_index,
                     args: vec![encoder::Instruction::Call {
                         func: program.resolve_equality_index(type_index),
                         args: vec![
@@ -1233,12 +1394,12 @@ fn encode_expression(
                 })
             }
             BinOp::NotEq => {
-                let gleam_bool_type_index = program.resolve_type_index(encoder, &prelude::bool());
+                let bool_type_index = program.resolve_prelude_type_index(PreludeType::Bool);
                 let type_index = program.resolve_type_index(encoder, &left.type_());
                 let equality_index = program.resolve_equality_index(type_index);
 
                 Ok(encoder::Instruction::StructNew {
-                    type_: gleam_bool_type_index,
+                    type_: bool_type_index,
                     args: vec![encoder::Instruction::I32Eqz(Box::new(
                         encoder::Instruction::Call {
                             func: equality_index,
@@ -1251,25 +1412,25 @@ fn encode_expression(
                 })
             }
             BinOp::LtInt | BinOp::LtEqInt | BinOp::GtEqInt | BinOp::GtInt => {
-                let gleam_bool_type_index = program.resolve_type_index(encoder, &prelude::bool());
-                let gleam_int_type_index = program.resolve_type_index(encoder, &prelude::int());
+                let bool_type_index = program.resolve_prelude_type_index(PreludeType::Bool);
+                let int_type_index = program.resolve_prelude_type_index(PreludeType::Int);
 
                 let lhs = encode_expression(program, encoder, module, function, left)?;
                 let lhs = encoder::Instruction::StructGet {
                     from: Box::new(lhs),
-                    type_: gleam_int_type_index,
+                    type_: int_type_index,
                     index: 0,
                 };
 
                 let rhs = encode_expression(program, encoder, module, function, right)?;
                 let rhs = encoder::Instruction::StructGet {
                     from: Box::new(rhs),
-                    type_: gleam_int_type_index,
+                    type_: int_type_index,
                     index: 0,
                 };
 
                 Ok(encoder::Instruction::StructNew {
-                    type_: gleam_bool_type_index,
+                    type_: bool_type_index,
                     args: vec![match name {
                         BinOp::LtInt => encoder::Instruction::I64LtS {
                             lhs: Box::new(lhs),
@@ -1292,25 +1453,25 @@ fn encode_expression(
                 })
             }
             BinOp::LtFloat | BinOp::LtEqFloat | BinOp::GtEqFloat | BinOp::GtFloat => {
-                let gleam_bool_type_index = program.resolve_type_index(encoder, &prelude::bool());
-                let gleam_float_type_index = program.resolve_type_index(encoder, &prelude::float());
+                let bool_type_index = program.resolve_prelude_type_index(PreludeType::Bool);
+                let float_type_index = program.resolve_prelude_type_index(PreludeType::Float);
 
                 let lhs = encode_expression(program, encoder, module, function, left)?;
                 let lhs = encoder::Instruction::StructGet {
                     from: Box::new(lhs),
-                    type_: gleam_float_type_index,
+                    type_: float_type_index,
                     index: 0,
                 };
 
                 let rhs = encode_expression(program, encoder, module, function, right)?;
                 let rhs = encoder::Instruction::StructGet {
                     from: Box::new(rhs),
-                    type_: gleam_float_type_index,
+                    type_: float_type_index,
                     index: 0,
                 };
 
                 Ok(encoder::Instruction::StructNew {
-                    type_: gleam_bool_type_index,
+                    type_: bool_type_index,
                     args: vec![match name {
                         BinOp::LtFloat => encoder::Instruction::F64Lt {
                             lhs: Box::new(lhs),
@@ -1337,26 +1498,25 @@ fn encode_expression(
             | BinOp::MultInt
             | BinOp::DivInt
             | BinOp::RemainderInt => {
-                let gleam_int_constructor_index =
-                    program.resolve_function_index_by_name("gleam".into(), "Int".into());
-                let gleam_int_type_index = program.resolve_type_index(encoder, &prelude::int());
+                let int_constructor_index = runtime::int_constructor(program);
+                let int_type_index = program.resolve_prelude_type_index(PreludeType::Int);
 
                 let lhs = encode_expression(program, encoder, module, function, left)?;
                 let lhs = encoder::Instruction::StructGet {
                     from: Box::new(lhs),
-                    type_: gleam_int_type_index,
+                    type_: int_type_index,
                     index: 0,
                 };
 
                 let rhs = encode_expression(program, encoder, module, function, right)?;
                 let rhs = encoder::Instruction::StructGet {
                     from: Box::new(rhs),
-                    type_: gleam_int_type_index,
+                    type_: int_type_index,
                     index: 0,
                 };
 
                 Ok(encoder::Instruction::Call {
-                    func: gleam_int_constructor_index,
+                    func: int_constructor_index,
                     args: vec![match name {
                         BinOp::AddInt => encoder::Instruction::I64Add {
                             lhs: Box::new(lhs),
@@ -1383,26 +1543,25 @@ fn encode_expression(
                 })
             }
             BinOp::AddFloat | BinOp::SubFloat | BinOp::MultFloat | BinOp::DivFloat => {
-                let gleam_float_constructor_index =
-                    program.resolve_function_index_by_name("gleam".into(), "Float".into());
-                let gleam_float_type_index = program.resolve_type_index(encoder, &prelude::float());
+                let float_constructor_index = runtime::float_constructor(program);
+                let float_type_index = program.resolve_prelude_type_index(PreludeType::Float);
 
                 let lhs = encode_expression(program, encoder, module, function, left)?;
                 let lhs = encoder::Instruction::StructGet {
                     from: Box::new(lhs),
-                    type_: gleam_float_type_index,
+                    type_: float_type_index,
                     index: 0,
                 };
 
                 let rhs = encode_expression(program, encoder, module, function, right)?;
                 let rhs = encoder::Instruction::StructGet {
                     from: Box::new(rhs),
-                    type_: gleam_float_type_index,
+                    type_: float_type_index,
                     index: 0,
                 };
 
                 Ok(encoder::Instruction::Call {
-                    func: gleam_float_constructor_index,
+                    func: float_constructor_index,
                     args: vec![match name {
                         BinOp::AddFloat => encoder::Instruction::F64Add {
                             lhs: Box::new(lhs),
@@ -1425,11 +1584,11 @@ fn encode_expression(
                 })
             }
             BinOp::Concatenate => {
-                let gleam_string_type = program.resolve_type_index(encoder, &prelude::string());
+                let string_type_index = program.resolve_prelude_type_index(PreludeType::String);
 
                 let local_type = encoder::ValType::Ref(encoder::RefType {
                     nullable: true,
-                    heap_type: encoder::HeapType::Concrete(gleam_string_type),
+                    heap_type: encoder::HeapType::Concrete(string_type_index),
                 });
 
                 let string = function.declare_anonymous_local(local_type.clone());
@@ -1455,7 +1614,7 @@ fn encode_expression(
                         encoder::Instruction::LocalSet {
                             local: string,
                             value: Box::new(encoder::Instruction::ArrayNewDefault {
-                                type_: gleam_string_type,
+                                type_: string_type_index,
                                 size: Box::new(encoder::Instruction::I32Add {
                                     lhs: Box::new(encoder::Instruction::ArrayLen(Box::new(
                                         encoder::Instruction::LocalGet(lhs),
@@ -1468,10 +1627,10 @@ fn encode_expression(
                         },
                         // Copy lhs into the new string
                         encoder::Instruction::ArrayCopy {
-                            dst_type: gleam_string_type,
+                            dst_type: string_type_index,
                             dst: Box::new(encoder::Instruction::LocalGet(string)),
                             dst_offset: Box::new(encoder::Instruction::I32Const(0)),
-                            src_type: gleam_string_type,
+                            src_type: string_type_index,
                             src: Box::new(encoder::Instruction::LocalGet(lhs)),
                             src_offset: Box::new(encoder::Instruction::I32Const(0)),
                             size: Box::new(encoder::Instruction::ArrayLen(Box::new(
@@ -1480,12 +1639,12 @@ fn encode_expression(
                         },
                         // Copy rhs into the new string
                         encoder::Instruction::ArrayCopy {
-                            dst_type: gleam_string_type,
+                            dst_type: string_type_index,
                             dst: Box::new(encoder::Instruction::LocalGet(string)),
                             dst_offset: Box::new(encoder::Instruction::ArrayLen(Box::new(
                                 encoder::Instruction::LocalGet(lhs),
                             ))),
-                            src_type: gleam_string_type,
+                            src_type: string_type_index,
                             src: Box::new(encoder::Instruction::LocalGet(rhs)),
                             src_offset: Box::new(encoder::Instruction::I32Const(0)),
                             size: Box::new(encoder::Instruction::ArrayLen(Box::new(
@@ -1558,14 +1717,14 @@ fn encode_expression(
             })
         }
         TypedExpr::RecordAccess { index, record, .. } => {
-            let heap_type = program.resolve_type_index(encoder, &record.type_());
+            let heap_type_index = program.resolve_type_index(encoder, &record.type_());
 
             let index = u32::try_from(*index + 1).expect("Record is too large");
             let record = encode_expression(program, encoder, module, function, record)?;
 
             Ok(encoder::Instruction::StructGet {
                 from: Box::new(record),
-                type_: heap_type,
+                type_: heap_type_index,
                 index,
             })
         }
@@ -1579,7 +1738,19 @@ fn encode_expression(
                 let function_index =
                     program.resolve_function_index_by_name(module.clone(), name.clone());
 
-                Ok(encoder::Instruction::RefFunc(function_index))
+                let closure_type_index = program::runtime::closure_type_index(program);
+                let unit_type_index = program::runtime::unit_type_index(program);
+
+                Ok(encoder::Instruction::StructNew {
+                    type_: closure_type_index,
+                    args: vec![
+                        encoder::Instruction::RefFunc(function_index),
+                        encoder::Instruction::StructNew {
+                            type_: unit_type_index,
+                            args: vec![],
+                        },
+                    ],
+                })
             }
             ModuleValueConstructor::Constant { literal, .. } => match literal {
                 Constant::Int { value, .. } => {
@@ -1627,18 +1798,24 @@ fn encode_expression(
         }
         TypedExpr::Todo { .. } => todo!(),
         TypedExpr::Panic { .. } => todo!(),
-        TypedExpr::BitArray { .. } => todo!(),
+        TypedExpr::BitArray { segments, .. } => {
+            for segment in segments {
+                dbg!(segment);
+            }
+
+            todo!()
+        }
         TypedExpr::RecordUpdate { .. } => todo!(),
         TypedExpr::NegateBool { value, .. } => {
-            let gleam_bool_type_index = program.resolve_type_index(encoder, &prelude::bool());
+            let bool_type_index = program.resolve_prelude_type_index(PreludeType::Bool);
             let value = encode_expression(program, encoder, module, function, value)?;
 
             Ok(encoder::Instruction::StructNew {
-                type_: gleam_bool_type_index,
+                type_: bool_type_index,
                 args: vec![encoder::Instruction::I32Xor {
                     lhs: Box::new(encoder::Instruction::StructGet {
                         from: Box::new(value),
-                        type_: gleam_bool_type_index,
+                        type_: bool_type_index,
                         index: 0,
                     }),
                     rhs: Box::new(encoder::Instruction::I32Const(1)),
@@ -1646,16 +1823,16 @@ fn encode_expression(
             })
         }
         TypedExpr::NegateInt { value, .. } => {
-            let gleam_int_type_index = program.resolve_type_index(encoder, &prelude::int());
+            let int_type_index = program.resolve_prelude_type_index(PreludeType::Int);
             let value = encode_expression(program, encoder, module, function, value)?;
 
             Ok(encoder::Instruction::StructNew {
-                type_: gleam_int_type_index,
+                type_: int_type_index,
                 args: vec![encoder::Instruction::I64Sub {
                     lhs: Box::new(encoder::Instruction::I64Const(0)),
                     rhs: Box::new(encoder::Instruction::StructGet {
                         from: Box::new(value),
-                        type_: gleam_int_type_index,
+                        type_: int_type_index,
                         index: 0,
                     }),
                 }],
@@ -1670,7 +1847,7 @@ fn get_custom_type_definitions(module: &Module) -> impl Iterator<Item = &CustomT
         .definitions
         .iter()
         .filter_map(|definition| match definition {
-            ast::Definition::CustomType(custom_type) => Some(custom_type),
+            Definition::CustomType(custom_type) => Some(custom_type),
             _ => None,
         })
 }
@@ -1681,7 +1858,135 @@ fn get_function_definitions(module: &Module) -> impl Iterator<Item = &TypedFunct
         .definitions
         .iter()
         .filter_map(|definition| match definition {
-            ast::Definition::Function(function) => Some(function),
+            Definition::Function(function) => Some(function),
             _ => None,
         })
+}
+
+fn collect_captured_variables(
+    arguments: &[Arg<Arc<Type>>],
+    body: &[TypedStatement],
+) -> Vec<EcoString> {
+    let mut captured = vec![];
+    let mut variables = HashSet::new();
+
+    for argument in arguments {
+        match &argument.names {
+            ArgNames::Discard { .. } | ArgNames::LabelledDiscard { .. } => {}
+            ArgNames::Named { name } | ArgNames::NamedLabelled { name, .. } => {
+                _ = variables.insert(name.clone());
+            }
+        }
+    }
+
+    for statement in body {
+        match statement {
+            Statement::Expression(expression) => collect_captured_variables_from_expression(
+                expression,
+                &mut variables,
+                &mut captured,
+            ),
+            Statement::Assignment(assignment) => collect_captured_variables_from_assignment(
+                assignment,
+                &mut variables,
+                &mut captured,
+            ),
+            Statement::Use(_) => todo!(),
+        }
+    }
+
+    captured
+}
+
+fn collect_captured_variables_from_assignment(
+    assignment: &TypedAssignment,
+    variables: &mut HashSet<EcoString>,
+    captured: &mut Vec<EcoString>,
+) {
+    collect_captured_variables_from_expression(&assignment.value, variables, captured);
+    collect_captured_variables_from_pattern(&assignment.pattern, variables, captured);
+}
+
+fn collect_captured_variables_from_pattern(
+    pattern: &TypedPattern,
+    variables: &mut HashSet<EcoString>,
+    captured: &mut Vec<EcoString>,
+) {
+    match pattern {
+        Pattern::Int { .. } => todo!(),
+        Pattern::Float { .. } => todo!(),
+        Pattern::String { .. } => todo!(),
+        Pattern::Variable { name, .. } => {
+            _ = variables.insert(name.clone());
+        }
+        Pattern::VarUsage { .. } => todo!(),
+        Pattern::Assign { .. } => todo!(),
+        Pattern::Discard { .. } => todo!(),
+        Pattern::List { elements, tail, .. } => {
+            for element in elements {
+                collect_captured_variables_from_pattern(element, variables, captured);
+            }
+
+            if let Some(tail) = tail {
+                collect_captured_variables_from_pattern(tail, variables, captured);
+            }
+        }
+        Pattern::Constructor { .. } => todo!(),
+        Pattern::Tuple { elems, .. } => {
+            for elem in elems {
+                collect_captured_variables_from_pattern(elem, variables, captured);
+            }
+        }
+        Pattern::BitArray { .. } => todo!(),
+        Pattern::StringPrefix { .. } => todo!(),
+    }
+}
+
+fn collect_captured_variables_from_expression(
+    expression: &TypedExpr,
+    variables: &mut HashSet<EcoString>,
+    captured: &mut Vec<EcoString>,
+) {
+    match expression {
+        TypedExpr::Int { .. } => {}
+        TypedExpr::Float { .. } => todo!(),
+        TypedExpr::String { .. } => todo!(),
+        TypedExpr::Block { .. } => todo!(),
+        TypedExpr::Pipeline { .. } => todo!(),
+        TypedExpr::Var {
+            constructor, name, ..
+        } => match &constructor.variant {
+            ValueConstructorVariant::LocalVariable { .. } => {
+                if !variables.contains(name) {
+                    captured.push(name.clone());
+                }
+            }
+            ValueConstructorVariant::ModuleConstant { .. } => todo!(),
+            ValueConstructorVariant::LocalConstant { .. } => todo!(),
+            ValueConstructorVariant::ModuleFn { .. } => todo!(),
+            ValueConstructorVariant::Record { .. } => todo!(),
+        },
+        TypedExpr::Fn { .. } => todo!(),
+        TypedExpr::List { .. } => todo!(),
+        TypedExpr::Call { args, .. } => {
+            for arg in args {
+                collect_captured_variables_from_expression(&arg.value, variables, captured);
+            }
+        }
+        TypedExpr::BinOp { left, right, .. } => {
+            collect_captured_variables_from_expression(left, variables, captured);
+            collect_captured_variables_from_expression(right, variables, captured);
+        }
+        TypedExpr::Case { .. } => todo!(),
+        TypedExpr::RecordAccess { .. } => todo!(),
+        TypedExpr::ModuleSelect { .. } => todo!(),
+        TypedExpr::Tuple { .. } => todo!(),
+        TypedExpr::TupleIndex { .. } => todo!(),
+        TypedExpr::Todo { .. } => todo!(),
+        TypedExpr::Panic { .. } => todo!(),
+        TypedExpr::BitArray { .. } => todo!(),
+        TypedExpr::RecordUpdate { .. } => todo!(),
+        TypedExpr::NegateBool { .. } => todo!(),
+        TypedExpr::NegateInt { .. } => todo!(),
+    }
 }

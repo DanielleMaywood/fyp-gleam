@@ -50,6 +50,26 @@ impl Module {
         Self::declare(&mut self.type_map, "types")
     }
 
+    // pub fn define_rec_group<const N: usize>(
+    //     &mut self,
+    //     make: impl Fn(&[Index<Type>; N]) -> [SubType; N],
+    // ) -> [Index<Type>; N] {
+    //     let type_indices = [(); N].map(|_| self.declare_type());
+    //     let types = make(&type_indices);
+
+    //     let mut iter = type_indices.iter();
+
+    //     if let Some(index) = iter.next() {
+    //         self.define_type(*index, Type::Rec(types.to_vec()));
+    //     }
+
+    //     for index in iter {
+    //         self.define_type(*index, Type::RecElement);
+    //     }
+
+    //     type_indices
+    // }
+
     pub fn define_type(&mut self, index: Index<Type>, type_: Type) {
         Self::define(&mut self.type_map, index, type_);
     }

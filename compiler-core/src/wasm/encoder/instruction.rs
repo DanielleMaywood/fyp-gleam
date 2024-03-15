@@ -45,6 +45,10 @@ pub enum Instruction {
     // Reference Types Instructions
     RefNull(HeapType),
     RefFunc(Index<Function>),
+    RefTest {
+        value: Box<Self>,
+        type_: RefType,
+    },
     RefCast {
         value: Box<Self>,
         type_: RefType,
@@ -299,6 +303,13 @@ impl Instruction {
                 vec![wasm_encoder::Instruction::RefFunc(
                     module.resolve_function_index(*index),
                 )]
+            }
+            Instruction::RefTest { value, type_ } => {
+                let mut encoded = value.encode(module, encoder);
+                encoded.push(wasm_encoder::Instruction::RefTest(
+                    type_.encode(module, encoder),
+                ));
+                encoded
             }
             Instruction::RefCast { value, type_ } => {
                 let mut encoded = value.encode(module, encoder);

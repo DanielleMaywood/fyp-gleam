@@ -18,7 +18,7 @@ pub struct Function {
     instructions: Vec<Instruction>,
     pub local_count: u32,
     local_map: im::HashMap<EcoString, Index<Local>>,
-    locals: Vec<ValType>,
+    local_types: im::OrdMap<Index<Local>, ValType>,
 }
 
 impl Function {
@@ -51,7 +51,7 @@ impl Function {
             instructions: vec![],
             local_count,
             local_map,
-            locals: vec![],
+            local_types: Default::default(),
         }
     }
 
@@ -66,7 +66,7 @@ impl Function {
     ) -> Index<Local> {
         let index = Index::new(self.local_count);
         self.local_count += 1;
-        self.locals.push(type_);
+        _ = self.local_types.insert(index, type_);
         _ = self.local_map.insert(name.into(), index);
         index
     }
@@ -76,6 +76,12 @@ impl Function {
             .get(&name.clone())
             .copied()
             .unwrap_or_else(|| panic!("No local index found for {}", name))
+    }
+
+    pub fn get_local_type(&self, name: EcoString) -> &ValType {
+        let local_index = self.get_local_index(name);
+
+        self.local_types.get(&local_index).unwrap()
     }
 
     pub fn instruction(&mut self, instruction: Instruction) {
@@ -100,9 +106,9 @@ impl Encode for Function {
         }
 
         let locals = self
-            .locals
+            .local_types
             .iter()
-            .map(|local| local.encode(module, encoder));
+            .map(|(_, local)| local.encode(module, encoder));
 
         let mut function = wasm_encoder::Function::new_with_locals_types(locals);
 

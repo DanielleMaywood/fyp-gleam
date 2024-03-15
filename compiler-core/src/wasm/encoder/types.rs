@@ -212,6 +212,8 @@ pub enum Type {
         element_type: StorageType,
         mutable: bool,
     },
+    Rec(Vec<SubType>),
+    RecElement,
 }
 
 impl Encode for Type {
@@ -249,6 +251,15 @@ impl Encode for Type {
                 let element_type = element_type.encode(module, encoder);
 
                 _ = encoder.type_section.array(&element_type, *mutable);
+            }
+            Type::RecElement => (),
+            Type::Rec(subtypes) => {
+                let subtypes = subtypes
+                    .iter()
+                    .map(|subtype| subtype.encode(module, encoder))
+                    .collect_vec();
+
+                _ = encoder.type_section.rec(subtypes);
             }
         }
     }

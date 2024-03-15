@@ -122,5 +122,20 @@ pub fn main() {
   let _ = pair.global
   let _ = global
 
+  // let pair = Pair(x: 2, y: 4)
+  // let pair = Pair(..pair, x: 1)
+  // let _ = pair
+
+  let captured = 5
+  let closure = fn(x) {
+    let y = 5
+
+    captured + x + y
+  }
+
+  let _ = closure(10)
+
+  let _ = <<1, 2:4, 3>>
+
   0
 }
