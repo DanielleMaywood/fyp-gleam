@@ -25,7 +25,7 @@ type AorB {
   B
 }
 
-fn return(value: Int, before: fn() -> a) -> Int {
+fn return(value: Int, before: fn() -> Int) -> Int {
   before()
   value
 }
