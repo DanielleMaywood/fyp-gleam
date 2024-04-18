@@ -735,19 +735,29 @@ fn encode_case_clause(
     clause: &Clause<TypedExpr, Arc<Type>, EcoString>,
     subjects: &[Index<Local>],
 ) -> encoder::Instruction {
-    clause.pattern.iter().zip(subjects.iter()).rfold(
-        encoder::Instruction::I32Const(1),
-        |then, (pattern, subject)| {
-            let condition = encode_case_pattern(program, encoder, function, pattern, *subject);
-
+    std::iter::once(&clause.pattern)
+        .chain(clause.alternative_patterns.iter())
+        .rfold(encoder::Instruction::I32Const(0), |else_, patterns| {
             encoder::Instruction::If {
                 type_: encoder::BlockType::Result(encoder::ValType::I32),
-                cond: Box::new(condition),
-                then: vec![then],
-                else_: vec![encoder::Instruction::I32Const(0)],
+                cond: Box::new(patterns.iter().zip(subjects.iter()).rfold(
+                    encoder::Instruction::I32Const(1),
+                    |then, (pattern, subject)| {
+                        let condition =
+                            encode_case_pattern(program, encoder, function, pattern, *subject);
+
+                        encoder::Instruction::If {
+                            type_: encoder::BlockType::Result(encoder::ValType::I32),
+                            cond: Box::new(condition),
+                            then: vec![then],
+                            else_: vec![encoder::Instruction::I32Const(0)],
+                        }
+                    },
+                )),
+                then: vec![encoder::Instruction::I32Const(1)],
+                else_: vec![else_],
             }
-        },
-    )
+        })
 }
 
 fn encode_case_pattern(
