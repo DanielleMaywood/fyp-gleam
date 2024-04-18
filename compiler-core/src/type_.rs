@@ -484,6 +484,7 @@ impl ValueConstructorVariant {
                 gleam: true,
                 can_run_on_erlang: true,
                 can_run_on_javascript: true,
+                can_run_on_wasm: false,
                 uses_javascript_externals: false,
                 uses_erlang_externals: false,
                 uses_wasm_externals: false,

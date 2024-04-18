@@ -53,7 +53,7 @@ pub fn pure_gleam_2() { pure_gleam_1() * 2 }
                     uses_wasm_externals: false,
                     can_run_on_erlang: true,
                     can_run_on_javascript: true,
-                    can_run_on_wasm: false,
+                    can_run_on_wasm: true,
                 }
             ),
             (
@@ -65,7 +65,7 @@ pub fn pure_gleam_2() { pure_gleam_1() * 2 }
                     uses_wasm_externals: false,
                     can_run_on_erlang: true,
                     can_run_on_javascript: true,
-                    can_run_on_wasm: false,
+                    can_run_on_wasm: true,
                 }
             )
         ],
@@ -173,7 +173,7 @@ pub fn pure_gleam() {
                     uses_wasm_externals: false,
                     can_run_on_erlang: true,
                     can_run_on_javascript: true,
-                    can_run_on_wasm: false,
+                    can_run_on_wasm: true,
                 }
             ),
             (
@@ -185,7 +185,7 @@ pub fn pure_gleam() {
                     uses_wasm_externals: false,
                     can_run_on_erlang: true,
                     can_run_on_javascript: true,
-                    can_run_on_wasm: false,
+                    can_run_on_wasm: true,
                 }
             ),
             (
@@ -197,7 +197,7 @@ pub fn pure_gleam() {
                     uses_wasm_externals: false,
                     can_run_on_erlang: true,
                     can_run_on_javascript: true,
-                    can_run_on_wasm: false,
+                    can_run_on_wasm: true,
                 }
             )
         ],

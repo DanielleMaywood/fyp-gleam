@@ -740,17 +740,11 @@ fn infer_function(
         ensure_annotations_present(&arguments, return_annotation.as_ref(), location)?;
     }
 
-<<<<<<< HEAD
     let definition = FunctionDefinition {
         has_body: !body.first().is_placeholder(),
         has_erlang_external: external_erlang.is_some(),
         has_javascript_external: external_javascript.is_some(),
-=======
-    let externals = Externals {
-        erlang: external_erlang.is_some(),
-        javascript: external_javascript.is_some(),
-        wasm: external_wasm.is_some(),
->>>>>>> 4cbba689 (Add wasm implementation check)
+        has_wasm_external: external_wasm.is_some(),
     };
 
     // Infer the type using the preregistered args + return types as a starting point
@@ -1076,17 +1070,11 @@ fn infer_module_constant(
 
     let mut expr_typer = ExprTyper::new(
         environment,
-<<<<<<< HEAD
         FunctionDefinition {
             has_body: true,
             has_erlang_external: false,
             has_javascript_external: false,
-=======
-        Externals {
-            erlang: false,
-            javascript: false,
-            wasm: false,
->>>>>>> 4cbba689 (Add wasm implementation check)
+            has_wasm_external: false,
         },
     );
     let typed_expr = expr_typer.infer_const(&annotation, *value)?;
