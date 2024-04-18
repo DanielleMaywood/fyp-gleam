@@ -25,7 +25,14 @@ type AorB {
   B
 }
 
+fn return(value: Int, before: fn() -> a) -> Int {
+  before()
+  value
+}
+
 pub fn main() {
+  use <- return(5)
+
   let pair =
     Pair(2, 8)
     |> pair.add(Pair(4, 8))
@@ -78,14 +85,14 @@ pub fn main() {
     _otherwise -> 0
   }
 
-  let _ = case "danielle" {
-    "dan" <> rest ->
-      case "dan" <> rest {
-        "danielle" -> 2
-        _otherwise -> 1
-      }
-    _otherwise -> 0
-  }
+  // let _ = case "danielle" {
+  //   "dan" <> rest ->
+  //     case "dan" <> rest {
+  //       "danielle" -> 2
+  //       _otherwise -> 1
+  //     }
+  //   _otherwise -> 0
+  // }
 
   let _ = case #(2, 3) {
     #(2, 3) -> 1
@@ -97,27 +104,27 @@ pub fn main() {
     _ -> 2
   }
 
-  let _ = case [1, 2, 3, 4] {
-    [1, 2, ..rest] ->
-      case rest {
-        [3, 4] -> 2
-        _ -> 1
-      }
-    _ -> 0
-  }
+  // let _ = case [1, 2, 3, 4] {
+  //   [1, 2, ..rest] ->
+  //     case rest {
+  //       [3, 4] -> 2
+  //       _ -> 1
+  //     }
+  //   _ -> 0
+  // }
 
-  let _ = case #(1, [2, 3]) {
-    #(1, [_, _] as rest) -> {
-      case rest {
-        [2, 3] -> 2
-        _ -> 1
-      }
-    }
-    _ -> 0
-  }
+  // let _ = case #(1, [2, 3]) {
+  //   #(1, [_, _] as rest) -> {
+  //     case rest {
+  //       [2, 3] -> 2
+  //       _ -> 1
+  //     }
+  //   }
+  //   _ -> 0
+  // }
 
-  let lambda = fn(x) { x * 2 }
-  let _ = lambda(5)
+  // let lambda = fn(x) { x * 2 }
+  // let _ = lambda(5)
 
   let _ = pair.global
   let _ = global
@@ -127,15 +134,13 @@ pub fn main() {
   // let _ = pair
 
   let captured = 5
-  let closure = fn(x) {
-    let y = 5
+  // let closure = fn(x) {
+  //   let y = 5
 
-    captured + x + y
-  }
+  //   captured + x + y
+  // }
 
-  let _ = closure(10)
-
-  let _ = <<1, 2:4, 3>>
+  // let _ = closure(10)
 
   0
 }

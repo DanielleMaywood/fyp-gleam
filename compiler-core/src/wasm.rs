@@ -7,8 +7,9 @@ use vec1::Vec1;
 
 use crate::{
     ast::{
-        Arg, ArgNames, AssignName, BinOp, Clause, Constant, CustomType, Definition, Pattern,
-        Statement, TypedAssignment, TypedExpr, TypedFunction, TypedPattern, TypedStatement,
+        Arg, ArgNames, AssignName, BinOp, Clause, ClauseGuard, Constant, CustomType, Definition,
+        Pattern, Statement, TypedAssignment, TypedExpr, TypedFunction, TypedPattern,
+        TypedStatement,
     },
     build::Module,
     error::Result,
@@ -572,7 +573,7 @@ fn encode_statement(
         Statement::Assignment(assignment) => {
             encode_assignment(program, encoder, module, function, assignment)
         }
-        Statement::Use(_) => todo!(),
+        Statement::Use(..) => todo!(),
     }?;
 
     Ok(match keep_or_drop {
@@ -655,6 +656,76 @@ fn encode_string(
             encoder::Instruction::ArrayNewData(string_type_index, string_data_index),
         ],
     })
+}
+
+fn encode_guard_clause(
+    program: &mut Program,
+    encoder: &mut encoder::Module,
+    function: &mut encoder::Function,
+    guard: &ClauseGuard<Arc<Type>, EcoString>,
+) -> encoder::Instruction {
+    match guard {
+        ClauseGuard::Equals { left, right, .. } => {
+            let bool_type_index = program.resolve_prelude_type_index(PreludeType::Bool);
+            let type_index = program.resolve_type_index(encoder, &left.type_());
+
+            encoder::Instruction::StructNew {
+                type_: bool_type_index,
+                args: vec![encoder::Instruction::Call {
+                    func: program.resolve_equality_index(type_index),
+                    args: vec![
+                        encode_guard_clause(program, encoder, function, left),
+                        encode_guard_clause(program, encoder, function, right),
+                    ],
+                }],
+            }
+        }
+        ClauseGuard::NotEquals { left, right, .. } => {
+            let bool_type_index = program.resolve_prelude_type_index(PreludeType::Bool);
+            let type_index = program.resolve_type_index(encoder, &left.type_());
+            let equality_index = program.resolve_equality_index(type_index);
+
+            encoder::Instruction::StructNew {
+                type_: bool_type_index,
+                args: vec![encoder::Instruction::I32Eqz(Box::new(
+                    encoder::Instruction::Call {
+                        func: equality_index,
+                        args: vec![
+                            encode_guard_clause(program, encoder, function, left),
+                            encode_guard_clause(program, encoder, function, right),
+                        ],
+                    },
+                ))],
+            }
+        }
+        ClauseGuard::GtInt { .. } => todo!(),
+        ClauseGuard::GtEqInt { .. } => todo!(),
+        ClauseGuard::LtInt { .. } => todo!(),
+        ClauseGuard::LtEqInt { .. } => todo!(),
+        ClauseGuard::GtFloat { .. } => todo!(),
+        ClauseGuard::GtEqFloat { .. } => todo!(),
+        ClauseGuard::LtFloat { .. } => todo!(),
+        ClauseGuard::LtEqFloat { .. } => todo!(),
+        ClauseGuard::Or { .. } => todo!(),
+        ClauseGuard::And { .. } => todo!(),
+        ClauseGuard::Not { .. } => todo!(),
+        ClauseGuard::Var { name, .. } => {
+            encoder::Instruction::LocalGet(function.get_local_index(name.clone()))
+        }
+        ClauseGuard::TupleIndex { .. } => todo!(),
+        ClauseGuard::FieldAccess { .. } => todo!(),
+        ClauseGuard::ModuleSelect { .. } => todo!(),
+        ClauseGuard::Constant(constant) => match constant {
+            Constant::Int { value, .. } => encode_int(program, value.parse().unwrap()).unwrap(),
+            Constant::Float { .. } => todo!(),
+            Constant::String { .. } => todo!(),
+            Constant::Tuple { .. } => todo!(),
+            Constant::List { .. } => todo!(),
+            Constant::Record { .. } => todo!(),
+            Constant::BitArray { .. } => todo!(),
+            Constant::Var { .. } => todo!(),
+        },
+    }
 }
 
 fn encode_case_clause(
@@ -1693,10 +1764,31 @@ fn encode_expression(
                 clauses
                     .iter()
                     .rfold(encoder::Instruction::Unreachable, |else_, clause| {
-                        // TODO: Bug here with patterns that return 1 but the next returns 0
-
                         let condition =
                             encode_case_clause(program, encoder, function, clause, &subject_locals);
+
+                        let guard = match &clause.guard {
+                            Some(guard) => {
+                                let bool_type_index =
+                                    program.resolve_prelude_type_index(PreludeType::Bool);
+
+                                encoder::Instruction::StructGet {
+                                    type_: bool_type_index,
+                                    from: Box::new(encode_guard_clause(
+                                        program, encoder, function, guard,
+                                    )),
+                                    index: 0,
+                                }
+                            }
+                            None => encoder::Instruction::I32Const(1),
+                        };
+
+                        let condition = encoder::Instruction::If {
+                            type_: BlockType::Result(encoder::ValType::I32),
+                            cond: Box::new(condition),
+                            then: vec![guard],
+                            else_: vec![encoder::Instruction::I32Const(0)],
+                        };
 
                         let then =
                             encode_expression(program, encoder, module, function, &clause.then)
@@ -1880,22 +1972,26 @@ fn collect_captured_variables(
     }
 
     for statement in body {
-        match statement {
-            Statement::Expression(expression) => collect_captured_variables_from_expression(
-                expression,
-                &mut variables,
-                &mut captured,
-            ),
-            Statement::Assignment(assignment) => collect_captured_variables_from_assignment(
-                assignment,
-                &mut variables,
-                &mut captured,
-            ),
-            Statement::Use(_) => todo!(),
-        }
+        collect_captured_variables_from_statement(statement, &mut variables, &mut captured);
     }
 
     captured
+}
+
+fn collect_captured_variables_from_statement(
+    statement: &TypedStatement,
+    variables: &mut HashSet<EcoString>,
+    captured: &mut Vec<EcoString>,
+) {
+    match statement {
+        Statement::Expression(expression) => {
+            collect_captured_variables_from_expression(expression, variables, captured)
+        }
+        Statement::Assignment(assignment) => {
+            collect_captured_variables_from_assignment(assignment, variables, captured)
+        }
+        Statement::Use(_) => todo!(),
+    }
 }
 
 fn collect_captured_variables_from_assignment(
@@ -1913,15 +2009,19 @@ fn collect_captured_variables_from_pattern(
     captured: &mut Vec<EcoString>,
 ) {
     match pattern {
-        Pattern::Int { .. } => todo!(),
-        Pattern::Float { .. } => todo!(),
-        Pattern::String { .. } => todo!(),
+        Pattern::Int { .. } => {}
+        Pattern::Float { .. } => {}
+        Pattern::String { .. } => {}
         Pattern::Variable { name, .. } => {
             _ = variables.insert(name.clone());
         }
         Pattern::VarUsage { .. } => todo!(),
-        Pattern::Assign { .. } => todo!(),
-        Pattern::Discard { .. } => todo!(),
+        Pattern::Assign { name, pattern, .. } => {
+            _ = variables.insert(name.clone());
+
+            collect_captured_variables_from_pattern(pattern, variables, captured);
+        }
+        Pattern::Discard { .. } => {}
         Pattern::List { elements, tail, .. } => {
             for element in elements {
                 collect_captured_variables_from_pattern(element, variables, captured);
@@ -1931,14 +2031,33 @@ fn collect_captured_variables_from_pattern(
                 collect_captured_variables_from_pattern(tail, variables, captured);
             }
         }
-        Pattern::Constructor { .. } => todo!(),
+        Pattern::Constructor { arguments, .. } => {
+            for arg in arguments {
+                collect_captured_variables_from_pattern(&arg.value, variables, captured);
+            }
+        }
         Pattern::Tuple { elems, .. } => {
             for elem in elems {
                 collect_captured_variables_from_pattern(elem, variables, captured);
             }
         }
         Pattern::BitArray { .. } => todo!(),
-        Pattern::StringPrefix { .. } => todo!(),
+        Pattern::StringPrefix {
+            left_side_assignment,
+            right_side_assignment,
+            ..
+        } => {
+            if let Some((name, _)) = left_side_assignment {
+                _ = variables.insert(name.clone());
+            }
+
+            match right_side_assignment {
+                AssignName::Variable(name) => {
+                    _ = variables.insert(name.clone());
+                }
+                AssignName::Discard(_) => {}
+            }
+        }
     }
 }
 
@@ -1949,10 +2068,24 @@ fn collect_captured_variables_from_expression(
 ) {
     match expression {
         TypedExpr::Int { .. } => {}
-        TypedExpr::Float { .. } => todo!(),
-        TypedExpr::String { .. } => todo!(),
-        TypedExpr::Block { .. } => todo!(),
-        TypedExpr::Pipeline { .. } => todo!(),
+        TypedExpr::Float { .. } => {}
+        TypedExpr::String { .. } => {}
+        TypedExpr::Block { statements, .. } => {
+            for statement in statements {
+                collect_captured_variables_from_statement(statement, variables, captured);
+            }
+        }
+        TypedExpr::Pipeline {
+            assignments,
+            finally,
+            ..
+        } => {
+            for assignment in assignments {
+                collect_captured_variables_from_assignment(assignment, variables, captured);
+            }
+
+            collect_captured_variables_from_expression(finally, variables, captured);
+        }
         TypedExpr::Var {
             constructor, name, ..
         } => match &constructor.variant {
@@ -1961,13 +2094,25 @@ fn collect_captured_variables_from_expression(
                     captured.push(name.clone());
                 }
             }
-            ValueConstructorVariant::ModuleConstant { .. } => todo!(),
-            ValueConstructorVariant::LocalConstant { .. } => todo!(),
-            ValueConstructorVariant::ModuleFn { .. } => todo!(),
-            ValueConstructorVariant::Record { .. } => todo!(),
+            ValueConstructorVariant::ModuleConstant { .. } => {}
+            ValueConstructorVariant::LocalConstant { .. } => {}
+            ValueConstructorVariant::ModuleFn { .. } => {}
+            ValueConstructorVariant::Record { .. } => {}
         },
-        TypedExpr::Fn { .. } => todo!(),
-        TypedExpr::List { .. } => todo!(),
+        TypedExpr::Fn { body, .. } => {
+            for statement in body {
+                collect_captured_variables_from_statement(statement, variables, captured);
+            }
+        }
+        TypedExpr::List { elements, tail, .. } => {
+            for element in elements {
+                collect_captured_variables_from_expression(element, variables, captured);
+            }
+
+            if let Some(tail) = tail {
+                collect_captured_variables_from_expression(tail, variables, captured);
+            }
+        }
         TypedExpr::Call { args, .. } => {
             for arg in args {
                 collect_captured_variables_from_expression(&arg.value, variables, captured);
@@ -1977,16 +2122,47 @@ fn collect_captured_variables_from_expression(
             collect_captured_variables_from_expression(left, variables, captured);
             collect_captured_variables_from_expression(right, variables, captured);
         }
-        TypedExpr::Case { .. } => todo!(),
-        TypedExpr::RecordAccess { .. } => todo!(),
-        TypedExpr::ModuleSelect { .. } => todo!(),
-        TypedExpr::Tuple { .. } => todo!(),
-        TypedExpr::TupleIndex { .. } => todo!(),
+        TypedExpr::Case {
+            subjects, clauses, ..
+        } => {
+            for subject in subjects {
+                collect_captured_variables_from_expression(subject, variables, captured);
+            }
+
+            for clause in clauses {
+                collect_captured_variables_from_expression(&clause.then, variables, captured);
+
+                for pattern in &clause.pattern {
+                    collect_captured_variables_from_pattern(&pattern, variables, captured);
+                }
+
+                for alternative_pattern in &clause.alternative_patterns {
+                    for pattern in alternative_pattern {
+                        collect_captured_variables_from_pattern(&pattern, variables, captured);
+                    }
+                }
+            }
+        }
+        TypedExpr::RecordAccess { record, .. } => {
+            collect_captured_variables_from_expression(record, variables, captured);
+        }
+        TypedExpr::ModuleSelect { .. } => {}
+        TypedExpr::Tuple { elems, .. } => {
+            for elem in elems {
+                collect_captured_variables_from_expression(elem, variables, captured);
+            }
+        }
+        TypedExpr::TupleIndex { tuple, .. } => {
+            collect_captured_variables_from_expression(tuple, variables, captured);
+        }
         TypedExpr::Todo { .. } => todo!(),
         TypedExpr::Panic { .. } => todo!(),
-        TypedExpr::BitArray { .. } => todo!(),
+        // TODO: Do this in the future
+        TypedExpr::BitArray { .. } => {}
         TypedExpr::RecordUpdate { .. } => todo!(),
-        TypedExpr::NegateBool { .. } => todo!(),
+        TypedExpr::NegateBool { value, .. } => {
+            collect_captured_variables_from_expression(value, variables, captured);
+        }
         TypedExpr::NegateInt { .. } => todo!(),
     }
 }
