@@ -932,17 +932,77 @@ fn encode_case_pattern(
                 }
             }
         }
-        Pattern::Constructor { name, type_, .. } => {
+        Pattern::Constructor {
+            name,
+            arguments,
+            type_,
+            ..
+        } => {
             let type_index = program.resolve_type_index(encoder, type_);
             let tag = program.resolve_type_variant_tag(type_index, name.clone());
 
-            encoder::Instruction::I32Eq {
+            let Some((module, type_name)) = type_.named_type_name() else {
+                panic!("This should always be a named type")
+            };
+
+            let variant_type_index = program.resolve_type_index_by_name(
+                module,
+                EcoString::from(format!("{}.{}", type_name, name)),
+            );
+
+            let tags_match = encoder::Instruction::I32Eq {
                 lhs: Box::new(encoder::Instruction::StructGet {
                     from: Box::new(encoder::Instruction::LocalGet(subject)),
                     type_: type_index,
                     index: 0,
                 }),
                 rhs: Box::new(encoder::Instruction::I32Const(tag)),
+            };
+
+            let arguments_match = arguments.iter().enumerate().rfold(
+                encoder::Instruction::I32Const(1),
+                |then, (idx, arg)| {
+                    let field = encoder::Instruction::StructGet {
+                        from: Box::new(encoder::Instruction::RefCast {
+                            value: Box::new(encoder::Instruction::LocalGet(subject)),
+                            type_: encoder::RefType {
+                                nullable: true,
+                                heap_type: encoder::HeapType::Concrete(variant_type_index),
+                            },
+                        }),
+                        type_: variant_type_index,
+                        index: (1 + idx).try_into().unwrap(),
+                    };
+
+                    let field_type = program.resolve_type(encoder, &arg.value.type_());
+                    let field_index = function.declare_anonymous_local(field_type);
+
+                    let cond =
+                        encode_case_pattern(program, encoder, function, &arg.value, field_index);
+
+                    encoder::Instruction::Block {
+                        type_: encoder::BlockType::Result(encoder::ValType::I32),
+                        code: vec![
+                            encoder::Instruction::LocalSet {
+                                local: field_index,
+                                value: Box::new(field),
+                            },
+                            encoder::Instruction::If {
+                                type_: encoder::BlockType::Result(encoder::ValType::I32),
+                                cond: Box::new(cond),
+                                then: vec![then],
+                                else_: vec![encoder::Instruction::I32Const(0)],
+                            },
+                        ],
+                    }
+                },
+            );
+
+            encoder::Instruction::If {
+                type_: encoder::BlockType::Result(encoder::ValType::I32),
+                cond: Box::new(tags_match),
+                then: vec![arguments_match],
+                else_: vec![encoder::Instruction::I32Const(0)],
             }
         }
         Pattern::Tuple { elems, .. } => elems.iter().enumerate().rfold(
