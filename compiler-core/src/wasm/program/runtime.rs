@@ -1,6 +1,7 @@
 use ecow::EcoString;
 
 use crate::type_::prelude::{self, PreludeType};
+use crate::type_::Type;
 use crate::wasm::encoder;
 
 use super::Program;
@@ -20,6 +21,65 @@ pub fn register(program: &mut Program, encoder: &mut encoder::Module) {
     register_prelude_bool(program, encoder);
     register_prelude_list(program, encoder);
     register_prelude_string(program, encoder);
+}
+
+pub fn tuple_get(
+    type_index: encoder::Index<encoder::Type>,
+    value: encoder::Instruction,
+    index: usize,
+) -> encoder::Instruction {
+    encoder::Instruction::StructGet {
+        from: Box::new(value),
+        type_: type_index,
+        index: index.try_into().unwrap(),
+    }
+}
+
+pub fn cast_to(value: encoder::Instruction, heap_type: encoder::HeapType) -> encoder::Instruction {
+    encoder::Instruction::RefCastNullable {
+        value: Box::new(value),
+        type_: heap_type,
+    }
+}
+
+pub fn get_type_tag(
+    type_index: encoder::Index<encoder::Type>,
+    value: encoder::Instruction,
+) -> encoder::Instruction {
+    encoder::Instruction::StructGet {
+        from: Box::new(value),
+        type_: type_index,
+        index: 0,
+    }
+}
+
+pub fn get_field_from_type(
+    type_index: encoder::Index<encoder::Type>,
+    field_index: usize,
+    value: encoder::Instruction,
+) -> encoder::Instruction {
+    encoder::Instruction::StructGet {
+        from: Box::new(value),
+        type_: type_index,
+        index: (1 + field_index).try_into().unwrap(),
+    }
+}
+
+pub fn eq(
+    program: &mut Program,
+    encoder: &mut encoder::Module,
+    type_: &Type,
+    lhs: encoder::Instruction,
+    rhs: encoder::Instruction,
+) -> encoder::Instruction {
+    let type_index = program.resolve_type_index(encoder, type_);
+
+    let are_equal = encoder::Instruction::Call {
+        func: program.resolve_equality_index(type_index),
+        args: vec![lhs, rhs],
+    };
+
+    bool(program, are_equal)
 }
 
 pub fn unit_type_index(program: &Program) -> encoder::Index<encoder::Type> {
@@ -114,8 +174,23 @@ fn register_prelude_nil(program: &mut Program, encoder: &mut encoder::Module) {
     );
 }
 
-pub fn int_constructor(program: &Program) -> encoder::Index<encoder::Function> {
-    program.resolve_function_index_by_name(PRELUDE_MODULE.into(), PreludeType::Int.name().into())
+pub fn int_to_i64(program: &mut Program, int: encoder::Instruction) -> encoder::Instruction {
+    let int_type_index = program.resolve_prelude_type_index(PreludeType::Int);
+
+    encoder::Instruction::StructGet {
+        from: Box::new(int),
+        type_: int_type_index,
+        index: 0,
+    }
+}
+
+pub fn int(program: &mut Program, value: encoder::Instruction) -> encoder::Instruction {
+    let int_type_index = program.resolve_prelude_type_index(PreludeType::Int);
+
+    encoder::Instruction::StructNew {
+        type_: int_type_index,
+        args: vec![value],
+    }
 }
 
 fn register_prelude_int(program: &mut Program, encoder: &mut encoder::Module) {
@@ -259,8 +334,23 @@ fn register_prelude_int(program: &mut Program, encoder: &mut encoder::Module) {
     encoder.define_function(to_int_function_index, to_int_function);
 }
 
-pub fn float_constructor(program: &Program) -> encoder::Index<encoder::Function> {
-    program.resolve_function_index_by_name("gleam".into(), "Float".into())
+pub fn float_to_f64(program: &Program, float: encoder::Instruction) -> encoder::Instruction {
+    let float_type_index = program.resolve_prelude_type_index(PreludeType::Float);
+
+    encoder::Instruction::StructGet {
+        from: Box::new(float),
+        type_: float_type_index,
+        index: 0,
+    }
+}
+
+pub fn float(program: &Program, value: encoder::Instruction) -> encoder::Instruction {
+    let float_type_index = program.resolve_prelude_type_index(PreludeType::Float);
+
+    encoder::Instruction::StructNew {
+        type_: float_type_index,
+        args: vec![value],
+    }
 }
 
 fn register_prelude_float(program: &mut Program, encoder: &mut encoder::Module) {
@@ -403,6 +493,49 @@ fn register_prelude_float(program: &mut Program, encoder: &mut encoder::Module) 
     encoder.define_function(to_float_function_index, to_float_function);
 }
 
+pub fn bool_to_i32(program: &mut Program, bool: encoder::Instruction) -> encoder::Instruction {
+    let bool_type_index = program.resolve_prelude_type_index(PreludeType::Bool);
+
+    encoder::Instruction::StructGet {
+        from: Box::new(bool),
+        type_: bool_type_index,
+        index: 0,
+    }
+}
+
+pub fn bool_true(program: &mut Program) -> encoder::Instruction {
+    let bool_type_index = program.resolve_prelude_type_index(PreludeType::Bool);
+
+    encoder::Instruction::StructNew {
+        type_: bool_type_index,
+        args: vec![encoder::Instruction::I32Const(1)],
+    }
+}
+
+pub fn bool_false(program: &mut Program) -> encoder::Instruction {
+    let bool_type_index = program.resolve_prelude_type_index(PreludeType::Bool);
+
+    encoder::Instruction::StructNew {
+        type_: bool_type_index,
+        args: vec![encoder::Instruction::I32Const(0)],
+    }
+}
+
+pub fn bool_negate(program: &mut Program, value: encoder::Instruction) -> encoder::Instruction {
+    let as_i32 = bool_to_i32(program, value);
+
+    bool(program, encoder::Instruction::I32Eqz(Box::new(as_i32)))
+}
+
+pub fn bool(program: &mut Program, value: encoder::Instruction) -> encoder::Instruction {
+    let bool_type_index = program.resolve_prelude_type_index(PreludeType::Bool);
+
+    encoder::Instruction::StructNew {
+        type_: bool_type_index,
+        args: vec![value],
+    }
+}
+
 fn register_prelude_bool(program: &mut Program, encoder: &mut encoder::Module) {
     let gleam_bool_index = encoder.declare_type();
     let gleam_bool = encoder::Type::Struct {
@@ -414,6 +547,8 @@ fn register_prelude_bool(program: &mut Program, encoder: &mut encoder::Module) {
 
     encoder.define_type(gleam_bool_index, gleam_bool);
     program.register_type_index("gleam", "Bool", gleam_bool_index);
+    program.register_type_index("gleam", "Bool.True", gleam_bool_index);
+    program.register_type_index("gleam", "Bool.False", gleam_bool_index);
 
     let gleam_bool_constructor_type_index = encoder.declare_type();
     let gleam_bool_constructor_type = encoder::Type::Function {
@@ -451,6 +586,7 @@ fn register_prelude_bool(program: &mut Program, encoder: &mut encoder::Module) {
     };
 
     program.register_function_index("gleam", "True", gleam_bool_true_constructor_index);
+    program.register_type_variant_tag(gleam_bool_index, "True", 1);
     encoder.define_function(
         gleam_bool_true_constructor_index,
         gleam_bool_true_constructor,
@@ -475,6 +611,7 @@ fn register_prelude_bool(program: &mut Program, encoder: &mut encoder::Module) {
     };
 
     program.register_function_index("gleam", "False", gleam_bool_false_constructor_index);
+    program.register_type_variant_tag(gleam_bool_index, "False", 0);
     encoder.define_function(
         gleam_bool_false_constructor_index,
         gleam_bool_false_constructor,
@@ -573,6 +710,22 @@ pub fn list_type_index(program: &Program) -> encoder::Index<encoder::Type> {
     program.resolve_type_index_by_name("gleam".into(), "List".into())
 }
 
+pub fn list_tail(program: &Program, value: encoder::Instruction) -> encoder::Instruction {
+    encoder::Instruction::StructGet {
+        from: Box::new(value),
+        type_: list_type_index(program),
+        index: 0,
+    }
+}
+
+pub fn list_head(program: &Program, value: encoder::Instruction) -> encoder::Instruction {
+    encoder::Instruction::StructGet {
+        from: Box::new(value),
+        type_: list_type_index(program),
+        index: 1,
+    }
+}
+
 fn register_prelude_list(program: &mut Program, encoder: &mut encoder::Module) {
     let gleam_list_index = encoder.declare_type();
     let gleam_list = encoder::Type::Struct {
@@ -607,6 +760,100 @@ fn register_prelude_string(program: &mut Program, encoder: &mut encoder::Module)
 
     program.register_type_index("gleam", "String", gleam_string_index);
     encoder.define_type(gleam_string_index, gleam_string);
+
+    let is_eq_function_type_index = encoder.declare_type();
+    let is_eq_function_type = encoder::Type::Function {
+        params: vec![
+            encoder::ValType::Ref(encoder::RefType {
+                nullable: true,
+                heap_type: encoder::HeapType::Concrete(gleam_string_index),
+            }),
+            encoder::ValType::Ref(encoder::RefType {
+                nullable: true,
+                heap_type: encoder::HeapType::Concrete(gleam_string_index),
+            }),
+        ],
+        results: vec![encoder::ValType::I32],
+    };
+
+    encoder.define_type(is_eq_function_type_index, is_eq_function_type);
+
+    let is_eq_function_index = encoder.declare_function();
+    let is_eq_function = {
+        let lhs_parameter = EcoString::from("lhs");
+        let rhs_parameter = EcoString::from("rhs");
+
+        let mut function = encoder::Function::new(
+            is_eq_function_index,
+            is_eq_function_type_index,
+            EcoString::from("gleam/String$eq"),
+            encoder::FunctionLinkage::Export,
+            vec![Some(lhs_parameter.clone()), Some(rhs_parameter.clone())],
+        );
+
+        let lhs_index = function.get_local_index(lhs_parameter);
+        let rhs_index = function.get_local_index(rhs_parameter);
+
+        let counter_index = function.declare_anonymous_local(encoder::ValType::I32);
+
+        let lhs_length =
+            encoder::Instruction::ArrayLen(Box::new(encoder::Instruction::LocalGet(lhs_index)));
+
+        let rhs_length =
+            encoder::Instruction::ArrayLen(Box::new(encoder::Instruction::LocalGet(rhs_index)));
+
+        function.instruction(encoder::Instruction::If {
+            type_: encoder::BlockType::Result(encoder::ValType::I32),
+            cond: Box::new(encoder::Instruction::I32Eq {
+                lhs: Box::new(lhs_length.clone()),
+                rhs: Box::new(rhs_length),
+            }),
+            then: vec![encoder::Instruction::Loop {
+                type_: encoder::BlockType::Result(encoder::ValType::I32),
+                code: vec![encoder::Instruction::If {
+                    type_: encoder::BlockType::Result(encoder::ValType::I32),
+                    cond: Box::new(encoder::Instruction::I32Ne {
+                        lhs: Box::new(lhs_length),
+                        rhs: Box::new(encoder::Instruction::LocalGet(counter_index)),
+                    }),
+                    then: vec![encoder::Instruction::If {
+                        type_: encoder::BlockType::Result(encoder::ValType::I32),
+                        cond: Box::new(encoder::Instruction::I32Eq {
+                            lhs: Box::new(encoder::Instruction::ArrayGetU {
+                                array: Box::new(encoder::Instruction::LocalGet(lhs_index)),
+                                index: Box::new(encoder::Instruction::LocalGet(counter_index)),
+                                type_: gleam_string_index,
+                            }),
+                            rhs: Box::new(encoder::Instruction::ArrayGetU {
+                                array: Box::new(encoder::Instruction::LocalGet(rhs_index)),
+                                index: Box::new(encoder::Instruction::LocalGet(counter_index)),
+                                type_: gleam_string_index,
+                            }),
+                        }),
+                        then: vec![
+                            encoder::Instruction::LocalSet {
+                                local: counter_index,
+                                value: Box::new(encoder::Instruction::I32Add {
+                                    lhs: Box::new(encoder::Instruction::LocalGet(counter_index)),
+                                    rhs: Box::new(encoder::Instruction::I32Const(1)),
+                                }),
+                            },
+                            encoder::Instruction::Br(2),
+                        ],
+                        else_: vec![encoder::Instruction::I32Const(0)],
+                    }],
+                    else_: vec![encoder::Instruction::I32Const(1)],
+                }],
+            }],
+            else_: vec![encoder::Instruction::I32Const(0)],
+        });
+
+        function.instruction(encoder::Instruction::End);
+        function
+    };
+
+    encoder.define_function(is_eq_function_index, is_eq_function);
+    program.register_type_equality_index(gleam_string_index, is_eq_function_index);
 }
 
 pub fn string_compare(
@@ -628,7 +875,7 @@ pub fn string_compare(
             cond: Box::new(encoder::Instruction::I32Eq {
                 lhs: Box::new(encoder::Instruction::ArrayGetU {
                     array: Box::new(encoder::Instruction::LocalGet(local)),
-                    index: index.try_into().unwrap(),
+                    index: Box::new(encoder::Instruction::I32Const(index.try_into().unwrap())),
                     type_: gleam_string_type_index,
                 }),
                 rhs: Box::new(encoder::Instruction::I32Const(byte.into())),

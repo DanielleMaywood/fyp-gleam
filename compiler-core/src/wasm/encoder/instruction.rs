@@ -7,6 +7,7 @@ use super::{BlockType, Data, Encode, Function, HeapType, Index, Local, RefType, 
 pub enum Instruction {
     // Control Instructions
     End,
+    Nop,
     Drop(Box<Self>),
     Unreachable,
     Return(Option<Box<Self>>),
@@ -20,6 +21,10 @@ pub enum Instruction {
         type_: BlockType,
         code: Vec<Self>,
     },
+    Loop {
+        type_: BlockType,
+        code: Vec<Self>,
+    },
     Call {
         func: Index<Function>,
         args: Vec<Self>,
@@ -29,6 +34,7 @@ pub enum Instruction {
         ref_: Box<Self>,
         args: Vec<Self>,
     },
+    Br(u32),
     BrTable(Vec<u32>, u32),
 
     // Varible Instructions
@@ -44,14 +50,21 @@ pub enum Instruction {
 
     // Reference Types Instructions
     RefNull(HeapType),
+    RefIsNull(Box<Self>),
     RefFunc(Index<Function>),
-    RefTest {
+    RefTestNullable {
         value: Box<Self>,
-        type_: RefType,
+        type_: HeapType,
     },
-    RefCast {
+    RefCastNullable {
         value: Box<Self>,
-        type_: RefType,
+        type_: HeapType,
+    },
+    BrOnCast {
+        value: Box<Self>,
+        depth: u32,
+        from: RefType,
+        to: RefType,
     },
 
     // Numeric Instructions
@@ -178,7 +191,7 @@ pub enum Instruction {
     ArrayNewData(Index<Type>, Index<Data>),
     ArrayGetU {
         array: Box<Self>,
-        index: i32,
+        index: Box<Self>,
         type_: Index<Type>,
     },
     ArrayLen(Box<Self>),
@@ -192,6 +205,8 @@ pub enum Instruction {
         size: Box<Self>,
     },
     ArrayInitData(Index<Type>, Index<Data>),
+
+    _Pop,
 }
 
 impl Instruction {
@@ -216,6 +231,7 @@ impl Instruction {
         match self {
             // Control Instructions
             Instruction::End => vec![wasm_encoder::Instruction::End],
+            Instruction::Nop => vec![wasm_encoder::Instruction::Nop],
             Instruction::Drop(value) => {
                 let mut encoded = value.encode(module, encoder);
                 encoded.push(wasm_encoder::Instruction::Drop);
@@ -255,6 +271,14 @@ impl Instruction {
                 encoded.push(wasm_encoder::Instruction::End);
                 encoded
             }
+            Instruction::Loop { type_, code } => {
+                let mut encoded = vec![wasm_encoder::Instruction::Loop(
+                    type_.encode(module, encoder),
+                )];
+                encoded.extend(code.iter().flat_map(|code| code.encode(module, encoder)));
+                encoded.push(wasm_encoder::Instruction::End);
+                encoded
+            }
             Instruction::Call { func, args } => {
                 let mut encoded = args
                     .iter()
@@ -275,6 +299,9 @@ impl Instruction {
                     module.resolve_type_index(*type_),
                 ));
                 encoded
+            }
+            Instruction::Br(target) => {
+                vec![wasm_encoder::Instruction::Br(*target)]
             }
             Instruction::BrTable(targets, default) => {
                 vec![wasm_encoder::Instruction::BrTable(targets.into(), *default)]
@@ -299,23 +326,42 @@ impl Instruction {
                     heap_type.encode(module, encoder),
                 )]
             }
+            Instruction::RefIsNull(value) => {
+                let mut encoded = value.encode(module, encoder);
+                encoded.push(wasm_encoder::Instruction::RefIsNull);
+                encoded
+            }
             Instruction::RefFunc(index) => {
                 vec![wasm_encoder::Instruction::RefFunc(
                     module.resolve_function_index(*index),
                 )]
             }
-            Instruction::RefTest { value, type_ } => {
+            Instruction::RefTestNullable { value, type_ } => {
                 let mut encoded = value.encode(module, encoder);
-                encoded.push(wasm_encoder::Instruction::RefTest(
+                encoded.push(wasm_encoder::Instruction::RefTestNullable(
                     type_.encode(module, encoder),
                 ));
                 encoded
             }
-            Instruction::RefCast { value, type_ } => {
+            Instruction::RefCastNullable { value, type_ } => {
                 let mut encoded = value.encode(module, encoder);
-                encoded.push(wasm_encoder::Instruction::RefCast(
+                encoded.push(wasm_encoder::Instruction::RefCastNullable(
                     type_.encode(module, encoder),
                 ));
+                encoded
+            }
+            Instruction::BrOnCast {
+                value,
+                depth,
+                from,
+                to,
+            } => {
+                let mut encoded = value.encode(module, encoder);
+                encoded.push(wasm_encoder::Instruction::BrOnCast {
+                    relative_depth: *depth,
+                    from_ref_type: from.encode(module, encoder),
+                    to_ref_type: to.encode(module, encoder),
+                });
                 encoded
             }
 
@@ -425,10 +471,10 @@ impl Instruction {
             }
             Instruction::StructGet { from, type_, index } => {
                 let mut encoded = from.encode(module, encoder);
-                encoded.push(wasm_encoder::Instruction::StructGet(
-                    module.resolve_type_index(*type_),
-                    *index,
-                ));
+                encoded.push(wasm_encoder::Instruction::StructGet {
+                    struct_type_index: module.resolve_type_index(*type_),
+                    field_index: *index,
+                });
                 encoded
             }
             Instruction::ArrayNew(heap_type) => {
@@ -444,10 +490,10 @@ impl Instruction {
                 encoded
             }
             Instruction::ArrayNewData(heap_type, data) => {
-                vec![wasm_encoder::Instruction::ArrayNewData(
-                    module.resolve_type_index(*heap_type),
-                    data.get(),
-                )]
+                vec![wasm_encoder::Instruction::ArrayNewData {
+                    array_type_index: module.resolve_type_index(*heap_type),
+                    array_data_index: data.get(),
+                }]
             }
             Instruction::ArrayGetU {
                 array,
@@ -455,7 +501,7 @@ impl Instruction {
                 type_,
             } => {
                 let mut encoded = array.encode(module, encoder);
-                encoded.push(wasm_encoder::Instruction::I32Const(*index));
+                encoded.extend(index.encode(module, encoder));
                 encoded.push(wasm_encoder::Instruction::ArrayGetU(type_.get()));
                 encoded
             }
@@ -478,18 +524,20 @@ impl Instruction {
                 encoded.extend(src.encode(module, encoder));
                 encoded.extend(src_offset.encode(module, encoder));
                 encoded.extend(size.encode(module, encoder));
-                encoded.push(wasm_encoder::Instruction::ArrayCopy(
-                    module.resolve_type_index(*dst_type),
-                    module.resolve_type_index(*src_type),
-                ));
+                encoded.push(wasm_encoder::Instruction::ArrayCopy {
+                    array_type_index_dst: module.resolve_type_index(*dst_type),
+                    array_type_index_src: module.resolve_type_index(*src_type),
+                });
                 encoded
             }
             Instruction::ArrayInitData(heap_type, data) => {
-                vec![wasm_encoder::Instruction::ArrayInitData(
-                    module.resolve_type_index(*heap_type),
-                    data.get(),
-                )]
+                vec![wasm_encoder::Instruction::ArrayInitData {
+                    array_type_index: module.resolve_type_index(*heap_type),
+                    array_data_index: data.get(),
+                }]
             }
+
+            Instruction::_Pop => vec![],
         }
     }
 }

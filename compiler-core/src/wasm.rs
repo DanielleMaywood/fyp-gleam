@@ -11,24 +11,26 @@ use crate::{
         Pattern, Statement, TypedAssignment, TypedExpr, TypedFunction, TypedPattern,
         TypedStatement,
     },
-    build::Module,
+    build::Module as ModuleAst,
     error::Result,
     type_::{prelude::PreludeType, ModuleValueConstructor, Type, ValueConstructorVariant},
-    wasm::{
-        encoder::{BlockType, Index, Local},
-        program::{
-            runtime::{self, string_compare},
-            Program,
-        },
+    wasm::program::{
+        runtime::{self, string_compare},
+        Program,
     },
+};
+
+use self::encoder::{
+    BlockType, CompositeType, Data, FieldType, Function, FunctionLinkage, HeapType, Index,
+    Instruction, Local, Module, RefType, StorageType, StructType, SubType, ValType,
 };
 
 mod encoder;
 mod program;
 
-pub fn program(modules: &[Module]) -> Result<Vec<u8>> {
+pub fn program(modules: &[ModuleAst]) -> Result<Vec<u8>> {
     let mut program = Program::default();
-    let mut encoder = encoder::Module::default();
+    let mut encoder = Module::default();
 
     runtime::register(&mut program, &mut encoder);
 
@@ -45,8 +47,8 @@ pub fn program(modules: &[Module]) -> Result<Vec<u8>> {
 
 fn encode_module_declarations(
     program: &mut Program,
-    encoder: &mut encoder::Module,
-    module: &Module,
+    encoder: &mut Module,
+    module: &ModuleAst,
 ) -> Result<()> {
     for custom_type in get_custom_type_definitions(module) {
         encode_custom_type_declaration(program, encoder, module, custom_type)?;
@@ -61,8 +63,8 @@ fn encode_module_declarations(
 
 fn encode_custom_type_declaration(
     program: &mut Program,
-    encoder: &mut encoder::Module,
-    module: &Module,
+    encoder: &mut Module,
+    module: &ModuleAst,
     custom_type: &CustomType<Arc<Type>>,
 ) -> Result<()> {
     let parent_type_index = encoder.declare_type();
@@ -99,8 +101,8 @@ fn encode_custom_type_declaration(
 
 fn encode_function_declaration(
     program: &mut Program,
-    encoder: &mut encoder::Module,
-    module: &Module,
+    encoder: &mut Module,
+    module: &ModuleAst,
     function: &TypedFunction,
 ) -> Result<()> {
     let function_index = encoder.declare_function();
@@ -116,8 +118,8 @@ fn encode_function_declaration(
 
 fn encode_module_definitions(
     program: &mut Program,
-    encoder: &mut encoder::Module,
-    module: &Module,
+    encoder: &mut Module,
+    module: &ModuleAst,
 ) -> Result<()> {
     for custom_type in get_custom_type_definitions(module) {
         encode_custom_type_definition(program, encoder, module, custom_type)?;
@@ -132,12 +134,12 @@ fn encode_module_definitions(
 
 fn encode_custom_type_definition(
     program: &mut Program,
-    encoder: &mut encoder::Module,
-    module: &Module,
+    encoder: &mut Module,
+    module: &ModuleAst,
     custom_type: &CustomType<Arc<Type>>,
 ) -> Result<()> {
-    let tag_field = encoder::FieldType {
-        element_type: encoder::StorageType::Val(encoder::ValType::I32),
+    let tag_field = FieldType {
+        element_type: StorageType::Val(ValType::I32),
         mutable: false,
     };
 
@@ -164,8 +166,8 @@ fn encode_custom_type_definition(
             });
 
             let field_type = if all_fields_match {
-                encoder::FieldType {
-                    element_type: encoder::StorageType::Val(
+                FieldType {
+                    element_type: StorageType::Val(
                         program.resolve_type(encoder, &first_constructor_field.type_),
                     ),
                     mutable: false,
@@ -175,13 +177,11 @@ fn encode_custom_type_definition(
                 // as the shared field may come *after* a non-shared field. Wasm
                 // requires the shapes to match when we cast, so this satisfies
                 // the runtime.
-                encoder::FieldType {
-                    element_type: encoder::StorageType::Val(encoder::ValType::Ref(
-                        encoder::RefType {
-                            nullable: true,
-                            heap_type: encoder::HeapType::Any,
-                        },
-                    )),
+                FieldType {
+                    element_type: StorageType::Val(ValType::Ref(RefType {
+                        nullable: true,
+                        heap_type: HeapType::Any,
+                    })),
                     mutable: false,
                 }
             };
@@ -195,10 +195,10 @@ fn encode_custom_type_definition(
     let parent_type_index =
         program.resolve_type_index_by_name(module.ast.name.clone(), custom_type.name.clone());
 
-    let parent_type = encoder::Type::SubType(encoder::SubType {
+    let parent_type = encoder::Type::SubType(SubType {
         is_final: false,
         supertype_idx: None,
-        structural_type: encoder::CompositeType::Struct(encoder::StructType {
+        structural_type: CompositeType::Struct(StructType {
             fields: common_fields,
         }),
     });
@@ -211,8 +211,8 @@ fn encode_custom_type_definition(
         fields.extend(constructor.arguments.iter().map(|argument| {
             let type_ = program.resolve_type(encoder, &argument.type_);
 
-            encoder::FieldType {
-                element_type: encoder::StorageType::Val(type_),
+            FieldType {
+                element_type: StorageType::Val(type_),
                 mutable: false,
             }
         }));
@@ -222,10 +222,10 @@ fn encode_custom_type_definition(
             EcoString::from(format!("{}.{}", custom_type.name, constructor.name)),
         );
 
-        let constructor_type = encoder::Type::SubType(encoder::SubType {
+        let constructor_type = encoder::Type::SubType(SubType {
             is_final: true,
             supertype_idx: Some(parent_type_index),
-            structural_type: encoder::CompositeType::Struct(encoder::StructType { fields }),
+            structural_type: CompositeType::Struct(StructType { fields }),
         });
 
         encoder.define_type(constructor_type_index, constructor_type);
@@ -238,15 +238,15 @@ fn encode_custom_type_definition(
                     .iter()
                     .map(|argument| program.resolve_type(encoder, &argument.type_))
                     .collect_vec();
-                params.push(encoder::ValType::Ref(encoder::RefType {
+                params.push(ValType::Ref(RefType {
                     nullable: true,
-                    heap_type: encoder::HeapType::Struct,
+                    heap_type: HeapType::Struct,
                 }));
                 params
             },
-            results: vec![encoder::ValType::Ref(encoder::RefType {
+            results: vec![ValType::Ref(RefType {
                 nullable: true,
-                heap_type: encoder::HeapType::Concrete(parent_type_index),
+                heap_type: HeapType::Concrete(parent_type_index),
             })],
         };
 
@@ -263,11 +263,11 @@ fn encode_custom_type_definition(
                 .map(|name| Some(name.clone()))
                 .collect_vec();
 
-            let mut function = encoder::Function::new(
+            let mut function = Function::new(
                 constructor_function_index,
                 constructor_function_type_index,
                 EcoString::from(format!("{}/{}", module.ast.name, constructor.name)),
-                encoder::FunctionLinkage::Export,
+                FunctionLinkage::Export,
                 {
                     let mut arguments = arguments;
                     arguments.push(None);
@@ -278,18 +278,18 @@ fn encode_custom_type_definition(
             let constructor_tag =
                 program.resolve_type_variant_tag(parent_type_index, constructor.name.clone());
 
-            let mut arguments = vec![encoder::Instruction::I32Const(constructor_tag)];
+            let mut arguments = vec![Instruction::I32Const(constructor_tag)];
             arguments.extend(&mut {
-                argument_names.into_iter().map(|argument| {
-                    encoder::Instruction::LocalGet(function.get_local_index(argument))
-                })
+                argument_names
+                    .into_iter()
+                    .map(|argument| Instruction::LocalGet(function.get_local_index(argument)))
             });
 
-            function.instruction(encoder::Instruction::StructNew {
+            function.instruction(Instruction::StructNew {
                 type_: constructor_type_index,
                 args: arguments,
             });
-            function.instruction(encoder::Instruction::End);
+            function.instruction(Instruction::End);
             function
         };
 
@@ -304,16 +304,16 @@ fn encode_custom_type_definition(
     let equality_function_type_index = encoder.declare_type();
     let equality_function_type = encoder::Type::Function {
         params: vec![
-            encoder::ValType::Ref(encoder::RefType {
+            ValType::Ref(RefType {
                 nullable: true,
-                heap_type: encoder::HeapType::Concrete(parent_type_index),
+                heap_type: HeapType::Concrete(parent_type_index),
             }),
-            encoder::ValType::Ref(encoder::RefType {
+            ValType::Ref(RefType {
                 nullable: true,
-                heap_type: encoder::HeapType::Concrete(parent_type_index),
+                heap_type: HeapType::Concrete(parent_type_index),
             }),
         ],
-        results: vec![encoder::ValType::I32],
+        results: vec![ValType::I32],
     };
 
     encoder.define_type(equality_function_type_index, equality_function_type);
@@ -323,11 +323,11 @@ fn encode_custom_type_definition(
         let lhs_parameter = EcoString::from("lhs");
         let rhs_parameter = EcoString::from("rhs");
 
-        let mut function = encoder::Function::new(
+        let mut function = Function::new(
             equality_function_index,
             equality_function_type_index,
             EcoString::from(format!("{}/{}$eq", module.ast.name, custom_type.name)),
-            encoder::FunctionLinkage::Export,
+            FunctionLinkage::Export,
             vec![Some(lhs_parameter.clone()), Some(rhs_parameter.clone())],
         );
 
@@ -336,35 +336,35 @@ fn encode_custom_type_definition(
 
         // If the given arguments are not the same variant,
         // then they are not equal.
-        function.instruction(encoder::Instruction::If {
-            type_: encoder::BlockType::Empty,
-            cond: Box::new(encoder::Instruction::I32Ne {
-                lhs: Box::new(encoder::Instruction::StructGet {
-                    from: Box::new(encoder::Instruction::LocalGet(lhs_index)),
+        function.instruction(Instruction::If {
+            type_: BlockType::Empty,
+            cond: Box::new(Instruction::I32Ne {
+                lhs: Box::new(Instruction::StructGet {
+                    from: Box::new(Instruction::LocalGet(lhs_index)),
                     type_: parent_type_index,
                     index: 0,
                 }),
-                rhs: Box::new(encoder::Instruction::StructGet {
-                    from: Box::new(encoder::Instruction::LocalGet(rhs_index)),
+                rhs: Box::new(Instruction::StructGet {
+                    from: Box::new(Instruction::LocalGet(rhs_index)),
                     type_: parent_type_index,
                     index: 0,
                 }),
             }),
-            then: vec![encoder::Instruction::Return(Some(Box::new(
-                encoder::Instruction::I32Const(0),
-            )))],
+            then: vec![Instruction::Return(Some(Box::new(Instruction::I32Const(
+                0,
+            ))))],
             else_: vec![],
         });
 
-        let branch_block = encoder::Instruction::Block {
-            type_: encoder::BlockType::Empty,
+        let branch_block = Instruction::Block {
+            type_: BlockType::Empty,
             code: vec![
-                encoder::Instruction::StructGet {
-                    from: Box::new(encoder::Instruction::LocalGet(lhs_index)),
+                Instruction::StructGet {
+                    from: Box::new(Instruction::LocalGet(lhs_index)),
                     type_: parent_type_index,
                     index: 0,
                 },
-                encoder::Instruction::BrTable(
+                Instruction::BrTable(
                     (0..custom_type.constructors.len() as u32).collect(),
                     custom_type.constructors.len() as u32,
                 ),
@@ -382,33 +382,27 @@ fn encode_custom_type_definition(
                     EcoString::from(format!("{}.{}", custom_type.name, constructor.name)),
                 );
 
-                let constructor_ref = encoder::ValType::Ref(encoder::RefType {
+                let constructor_ref = ValType::Ref(RefType {
                     nullable: true,
-                    heap_type: encoder::HeapType::Concrete(constructor_type_index),
+                    heap_type: HeapType::Concrete(constructor_type_index),
                 });
 
                 let lhs_casted_index = function.declare_anonymous_local(constructor_ref.clone());
                 let rhs_casted_index = function.declare_anonymous_local(constructor_ref);
 
-                code.push(encoder::Instruction::LocalSet {
+                code.push(Instruction::LocalSet {
                     local: lhs_casted_index,
-                    value: Box::new(encoder::Instruction::RefCast {
-                        type_: encoder::RefType {
-                            nullable: true,
-                            heap_type: encoder::HeapType::Concrete(constructor_type_index),
-                        },
-                        value: Box::new(encoder::Instruction::LocalGet(lhs_index)),
+                    value: Box::new(Instruction::RefCastNullable {
+                        type_: HeapType::Concrete(constructor_type_index),
+                        value: Box::new(Instruction::LocalGet(lhs_index)),
                     }),
                 });
 
-                code.push(encoder::Instruction::LocalSet {
+                code.push(Instruction::LocalSet {
                     local: rhs_casted_index,
-                    value: Box::new(encoder::Instruction::RefCast {
-                        type_: encoder::RefType {
-                            nullable: true,
-                            heap_type: encoder::HeapType::Concrete(constructor_type_index),
-                        },
-                        value: Box::new(encoder::Instruction::LocalGet(rhs_index)),
+                    value: Box::new(Instruction::RefCastNullable {
+                        type_: HeapType::Concrete(constructor_type_index),
+                        value: Box::new(Instruction::LocalGet(rhs_index)),
                     }),
                 });
 
@@ -416,45 +410,39 @@ fn encode_custom_type_definition(
                     let argument_type_index = program.resolve_type_index(encoder, &argument.type_);
                     let field_index = (argument_index + 1) as u32;
 
-                    code.push(encoder::Instruction::If {
-                        type_: encoder::BlockType::Empty,
-                        cond: Box::new(encoder::Instruction::I32Eqz(Box::new(
-                            encoder::Instruction::Call {
-                                func: program.resolve_equality_index(argument_type_index),
-                                args: vec![
-                                    encoder::Instruction::StructGet {
-                                        from: Box::new(encoder::Instruction::LocalGet(
-                                            lhs_casted_index,
-                                        )),
-                                        type_: constructor_type_index,
-                                        index: field_index,
-                                    },
-                                    encoder::Instruction::StructGet {
-                                        from: Box::new(encoder::Instruction::LocalGet(
-                                            rhs_casted_index,
-                                        )),
-                                        type_: constructor_type_index,
-                                        index: field_index,
-                                    },
-                                ],
-                            },
-                        ))),
-                        then: vec![encoder::Instruction::Return(Some(Box::new(
-                            encoder::Instruction::I32Const(0),
-                        )))],
+                    code.push(Instruction::If {
+                        type_: BlockType::Empty,
+                        cond: Box::new(Instruction::I32Eqz(Box::new(Instruction::Call {
+                            func: program.resolve_equality_index(argument_type_index),
+                            args: vec![
+                                Instruction::StructGet {
+                                    from: Box::new(Instruction::LocalGet(lhs_casted_index)),
+                                    type_: constructor_type_index,
+                                    index: field_index,
+                                },
+                                Instruction::StructGet {
+                                    from: Box::new(Instruction::LocalGet(rhs_casted_index)),
+                                    type_: constructor_type_index,
+                                    index: field_index,
+                                },
+                            ],
+                        }))),
+                        then: vec![Instruction::Return(Some(Box::new(Instruction::I32Const(
+                            0,
+                        ))))],
                         else_: vec![],
                     });
                 }
 
-                encoder::Instruction::Block {
-                    type_: encoder::BlockType::Empty,
+                Instruction::Block {
+                    type_: BlockType::Empty,
                     code,
                 }
             });
 
         function.instruction(block);
-        function.instruction(encoder::Instruction::I32Const(1));
-        function.instruction(encoder::Instruction::End);
+        function.instruction(Instruction::I32Const(1));
+        function.instruction(Instruction::End);
         function
     };
 
@@ -465,11 +453,10 @@ fn encode_custom_type_definition(
 
 fn encode_function_definition(
     program: &mut Program,
-    encoder: &mut encoder::Module,
-    module: &Module,
+    encoder: &mut Module,
+    module: &ModuleAst,
     the_function: &TypedFunction,
 ) -> Result<()> {
-    let function_type_index = encoder.declare_type();
     let function_type = encoder::Type::Function {
         params: {
             let mut params = the_function
@@ -478,26 +465,27 @@ fn encode_function_definition(
                 .map(|param| program.resolve_type(encoder, &param.type_))
                 .collect_vec();
             if the_function.name != "main" {
-                params.push(encoder::ValType::Ref(encoder::RefType {
+                params.push(ValType::Ref(RefType {
                     nullable: true,
-                    heap_type: encoder::HeapType::Struct,
+                    heap_type: HeapType::Struct,
                 }));
             }
             params
         },
         results: vec![program.resolve_type(encoder, &the_function.return_type)],
     };
+    let function_type_index = encoder.declare_type();
 
     encoder.define_type(function_type_index, function_type);
 
     let function_index =
         program.resolve_function_index_by_name(module.ast.name.clone(), the_function.name.clone());
 
-    let mut function = encoder::Function::new(
+    let mut function = Function::new(
         function_index,
         function_type_index,
         EcoString::from(format!("{}/{}", module.ast.name, the_function.name)),
-        encoder::FunctionLinkage::Export,
+        FunctionLinkage::Export,
         {
             let mut arguments = the_function
                 .arguments
@@ -509,7 +497,7 @@ fn encode_function_definition(
                     }
                 })
                 .collect_vec();
-            if the_function.name != "main" {
+            if !(the_function.name == "main" && the_function.publicity.is_public()) {
                 arguments.push(None);
             }
             arguments
@@ -520,7 +508,7 @@ fn encode_function_definition(
         function.instruction(instruction);
     }
 
-    function.instruction(encoder::Instruction::End);
+    function.instruction(Instruction::End);
 
     encoder.define_function(function_index, function);
 
@@ -534,11 +522,11 @@ enum KeepOrDrop {
 
 fn encode_block(
     program: &mut Program,
-    encoder: &mut encoder::Module,
-    module: &Module,
-    function: &mut encoder::Function,
+    encoder: &mut Module,
+    module: &ModuleAst,
+    function: &mut Function,
     body: &Vec1<TypedStatement>,
-) -> Result<Vec<encoder::Instruction>> {
+) -> Result<Vec<Instruction>> {
     body.iter()
         .enumerate()
         .map(|(statement_index, statement)| {
@@ -560,12 +548,12 @@ fn encode_block(
 
 fn encode_statement(
     program: &mut Program,
-    encoder: &mut encoder::Module,
-    module: &Module,
-    function: &mut encoder::Function,
+    encoder: &mut Module,
+    module: &ModuleAst,
+    function: &mut Function,
     statement: &TypedStatement,
     keep_or_drop: KeepOrDrop,
-) -> Result<encoder::Instruction> {
+) -> Result<Instruction> {
     let instruction = match statement {
         Statement::Expression(expression) => {
             encode_expression(program, encoder, module, function, expression)
@@ -578,146 +566,333 @@ fn encode_statement(
 
     Ok(match keep_or_drop {
         KeepOrDrop::Keep => instruction,
-        KeepOrDrop::Drop => encoder::Instruction::Drop(Box::new(instruction)),
+        KeepOrDrop::Drop => Instruction::Drop(Box::new(instruction)),
     })
 }
 
 fn encode_assignment(
     program: &mut Program,
-    encoder: &mut encoder::Module,
-    module: &Module,
-    function: &mut encoder::Function,
+    encoder: &mut Module,
+    module: &ModuleAst,
+    function: &mut Function,
     assignment: &TypedAssignment,
-) -> Result<encoder::Instruction> {
-    match &assignment.pattern {
+) -> Result<Instruction> {
+    let value_type = program.resolve_type(encoder, &assignment.value.type_());
+    let value_local = function.declare_anonymous_local(value_type.clone());
+
+    Ok(Instruction::Block {
+        type_: BlockType::Result(value_type),
+        code: vec![
+            Instruction::LocalSet {
+                local: value_local,
+                value: Box::new(encode_expression(
+                    program,
+                    encoder,
+                    module,
+                    function,
+                    &assignment.value,
+                )?),
+            },
+            encode_assignment_pattern(
+                program,
+                encoder,
+                module,
+                function,
+                value_local,
+                &assignment.pattern,
+                &assignment.value.type_(),
+            )?,
+            Instruction::LocalGet(value_local),
+        ],
+    })
+}
+
+fn encode_assignment_pattern(
+    program: &mut Program,
+    encoder: &mut Module,
+    module: &ModuleAst,
+    function: &mut Function,
+    value_local: Index<Local>,
+    pattern: &Pattern<Arc<Type>>,
+    type_: &Type,
+) -> Result<Instruction> {
+    match &pattern {
         Pattern::Int { .. } => todo!(),
         Pattern::Float { .. } => todo!(),
         Pattern::String { .. } => todo!(),
         Pattern::Variable { name, .. } => {
-            let value = encode_expression(program, encoder, module, function, &assignment.value)?;
-
-            let local_type = program.resolve_type(encoder, &assignment.value.type_());
+            let local_type = program.resolve_type(encoder, type_);
             let local_index = function.declare_local(name.clone(), local_type);
 
-            Ok(encoder::Instruction::LocalTee {
+            Ok(Instruction::LocalSet {
                 local: local_index,
-                value: Box::new(value),
+                value: Box::new(Instruction::LocalGet(value_local)),
             })
         }
         Pattern::VarUsage { .. } => todo!(),
         Pattern::Assign { .. } => todo!(),
-        Pattern::Discard { .. } => {
-            encode_expression(program, encoder, module, function, &assignment.value)
-        }
+        Pattern::Discard { .. } => Ok(Instruction::Nop),
         Pattern::List { .. } => todo!(),
         Pattern::Constructor { .. } => todo!(),
-        Pattern::Tuple { .. } => todo!(),
+        Pattern::Tuple { elems, .. } => Ok(Instruction::Block {
+            type_: BlockType::Empty,
+            code: elems
+                .iter()
+                .enumerate()
+                .map(|(index, element)| {
+                    let element_type = program.resolve_type(encoder, &element.type_());
+                    let element_local = function.declare_anonymous_local(element_type);
+
+                    let tuple_type_index = program.resolve_type_index(encoder, &pattern.type_());
+
+                    Instruction::Block {
+                        type_: BlockType::Empty,
+                        code: vec![
+                            Instruction::LocalSet {
+                                local: element_local,
+                                value: Box::new(runtime::tuple_get(
+                                    tuple_type_index,
+                                    Instruction::LocalGet(value_local),
+                                    index,
+                                )),
+                            },
+                            encode_assignment_pattern(
+                                program,
+                                encoder,
+                                module,
+                                function,
+                                element_local,
+                                element,
+                                &element.type_(),
+                            )
+                            .unwrap(),
+                        ],
+                    }
+                })
+                .collect(),
+        }),
         Pattern::BitArray { .. } => todo!(),
         Pattern::StringPrefix { .. } => todo!(),
     }
 }
 
-fn encode_int(program: &mut Program, value: i64) -> Result<encoder::Instruction> {
-    Ok(encoder::Instruction::Call {
-        func: runtime::int_constructor(program),
-        args: vec![encoder::Instruction::I64Const(value)],
-    })
+fn encode_int(program: &mut Program, value: &str) -> Result<Instruction> {
+    let value = value
+        .replace("_", "")
+        .parse::<i64>()
+        .expect("Value unsupported");
+
+    Ok(runtime::int(program, Instruction::I64Const(value)))
 }
 
-fn encode_float(program: &mut Program, value: f64) -> Result<encoder::Instruction> {
-    Ok(encoder::Instruction::Call {
-        func: runtime::float_constructor(program),
-        args: vec![encoder::Instruction::F64Const(value)],
-    })
+fn encode_float(program: &mut Program, value: &str) -> Result<Instruction> {
+    let value = value.parse::<f64>().expect("Value unsupported");
+
+    Ok(runtime::float(program, Instruction::F64Const(value)))
 }
 
 fn encode_string(
     program: &mut Program,
-    encoder: &mut encoder::Module,
+    encoder: &mut Module,
     value: &EcoString,
-) -> Result<encoder::Instruction> {
+) -> Result<Instruction> {
     let string_type_index = program.resolve_prelude_type_index(PreludeType::String);
 
     let string_data_index = encoder.declare_data();
-    let string_data = encoder::Data::new(value.bytes().collect_vec());
+    let string_data = Data::new(value.bytes().collect_vec());
 
     encoder.define_data(string_data_index, string_data);
 
     let string_length = i32::try_from(value.as_bytes().len()).expect("String too long");
 
-    Ok(encoder::Instruction::Block {
-        type_: encoder::BlockType::Result(encoder::ValType::Ref(encoder::RefType {
+    Ok(Instruction::Block {
+        type_: BlockType::Result(ValType::Ref(RefType {
             nullable: true,
-            heap_type: encoder::HeapType::Concrete(string_type_index),
+            heap_type: HeapType::Concrete(string_type_index),
         })),
         code: vec![
-            encoder::Instruction::I32Const(0),
-            encoder::Instruction::I32Const(string_length),
-            encoder::Instruction::ArrayNewData(string_type_index, string_data_index),
+            Instruction::I32Const(0),
+            Instruction::I32Const(string_length),
+            Instruction::ArrayNewData(string_type_index, string_data_index),
         ],
     })
 }
 
 fn encode_guard_clause(
     program: &mut Program,
-    encoder: &mut encoder::Module,
-    function: &mut encoder::Function,
+    encoder: &mut Module,
+    function: &mut Function,
     guard: &ClauseGuard<Arc<Type>, EcoString>,
-) -> encoder::Instruction {
+) -> Instruction {
     match guard {
         ClauseGuard::Equals { left, right, .. } => {
-            let bool_type_index = program.resolve_prelude_type_index(PreludeType::Bool);
-            let type_index = program.resolve_type_index(encoder, &left.type_());
+            let lhs = encode_guard_clause(program, encoder, function, left);
+            let rhs = encode_guard_clause(program, encoder, function, right);
 
-            encoder::Instruction::StructNew {
-                type_: bool_type_index,
-                args: vec![encoder::Instruction::Call {
-                    func: program.resolve_equality_index(type_index),
-                    args: vec![
-                        encode_guard_clause(program, encoder, function, left),
-                        encode_guard_clause(program, encoder, function, right),
-                    ],
-                }],
-            }
+            runtime::eq(program, encoder, &left.type_(), lhs, rhs)
         }
         ClauseGuard::NotEquals { left, right, .. } => {
-            let bool_type_index = program.resolve_prelude_type_index(PreludeType::Bool);
             let type_index = program.resolve_type_index(encoder, &left.type_());
-            let equality_index = program.resolve_equality_index(type_index);
 
-            encoder::Instruction::StructNew {
-                type_: bool_type_index,
-                args: vec![encoder::Instruction::I32Eqz(Box::new(
-                    encoder::Instruction::Call {
-                        func: equality_index,
-                        args: vec![
-                            encode_guard_clause(program, encoder, function, left),
-                            encode_guard_clause(program, encoder, function, right),
-                        ],
-                    },
-                ))],
+            let is_not_equal = Instruction::I32Eqz(Box::new(Instruction::Call {
+                func: program.resolve_equality_index(type_index),
+                args: vec![
+                    encode_guard_clause(program, encoder, function, left),
+                    encode_guard_clause(program, encoder, function, right),
+                ],
+            }));
+
+            runtime::bool(program, is_not_equal)
+        }
+        ClauseGuard::GtInt { left, right, .. } => {
+            let lhs = encode_guard_clause(program, encoder, function, left);
+            let rhs = encode_guard_clause(program, encoder, function, right);
+
+            let is_greater_than = Instruction::I64GtS {
+                lhs: Box::new(runtime::int_to_i64(program, lhs)),
+                rhs: Box::new(runtime::int_to_i64(program, rhs)),
+            };
+
+            runtime::bool(program, is_greater_than)
+        }
+        ClauseGuard::GtEqInt { left, right, .. } => {
+            let lhs = encode_guard_clause(program, encoder, function, left);
+            let rhs = encode_guard_clause(program, encoder, function, right);
+
+            let is_greater_than_or_equal_to = Instruction::I64GeS {
+                lhs: Box::new(runtime::int_to_i64(program, lhs)),
+                rhs: Box::new(runtime::int_to_i64(program, rhs)),
+            };
+
+            runtime::bool(program, is_greater_than_or_equal_to)
+        }
+        ClauseGuard::LtInt { left, right, .. } => {
+            let lhs = encode_guard_clause(program, encoder, function, left);
+            let rhs = encode_guard_clause(program, encoder, function, right);
+
+            let is_less_than = Instruction::I64LtS {
+                lhs: Box::new(runtime::int_to_i64(program, lhs)),
+                rhs: Box::new(runtime::int_to_i64(program, rhs)),
+            };
+
+            runtime::bool(program, is_less_than)
+        }
+        ClauseGuard::LtEqInt { left, right, .. } => {
+            let lhs = encode_guard_clause(program, encoder, function, left);
+            let rhs = encode_guard_clause(program, encoder, function, right);
+
+            let is_less_than_or_equal_to = Instruction::I64LeS {
+                lhs: Box::new(runtime::int_to_i64(program, lhs)),
+                rhs: Box::new(runtime::int_to_i64(program, rhs)),
+            };
+
+            runtime::bool(program, is_less_than_or_equal_to)
+        }
+        ClauseGuard::GtFloat { left, right, .. } => {
+            let lhs = encode_guard_clause(program, encoder, function, left);
+            let rhs = encode_guard_clause(program, encoder, function, right);
+
+            let is_greater_than = Instruction::F64Gt {
+                lhs: Box::new(runtime::float_to_f64(program, lhs)),
+                rhs: Box::new(runtime::float_to_f64(program, rhs)),
+            };
+
+            runtime::bool(program, is_greater_than)
+        }
+        ClauseGuard::GtEqFloat { left, right, .. } => {
+            let lhs = encode_guard_clause(program, encoder, function, left);
+            let rhs = encode_guard_clause(program, encoder, function, right);
+
+            let is_greater_than_or_equal_to = Instruction::F64Ge {
+                lhs: Box::new(runtime::float_to_f64(program, lhs)),
+                rhs: Box::new(runtime::float_to_f64(program, rhs)),
+            };
+
+            runtime::bool(program, is_greater_than_or_equal_to)
+        }
+        ClauseGuard::LtFloat { left, right, .. } => {
+            let lhs = encode_guard_clause(program, encoder, function, left);
+            let rhs = encode_guard_clause(program, encoder, function, right);
+
+            let is_less_than = Instruction::F64Lt {
+                lhs: Box::new(runtime::float_to_f64(program, lhs)),
+                rhs: Box::new(runtime::float_to_f64(program, rhs)),
+            };
+
+            runtime::bool(program, is_less_than)
+        }
+        ClauseGuard::LtEqFloat { left, right, .. } => {
+            let lhs = encode_guard_clause(program, encoder, function, left);
+            let rhs = encode_guard_clause(program, encoder, function, right);
+
+            let is_less_than_or_equal_to = Instruction::F64Le {
+                lhs: Box::new(runtime::float_to_f64(program, lhs)),
+                rhs: Box::new(runtime::float_to_f64(program, rhs)),
+            };
+
+            runtime::bool(program, is_less_than_or_equal_to)
+        }
+        ClauseGuard::Or { left, right, .. } => {
+            let bool_type = program.resolve_prelude_type(PreludeType::Bool);
+
+            let lhs = encode_guard_clause(program, encoder, function, left);
+            let rhs = encode_guard_clause(program, encoder, function, right);
+
+            Instruction::If {
+                type_: BlockType::Result(bool_type),
+                cond: Box::new(Instruction::I32Eqz(Box::new(runtime::bool_to_i32(
+                    program, lhs,
+                )))),
+                then: vec![rhs],
+                else_: vec![runtime::bool_true(program)],
             }
         }
-        ClauseGuard::GtInt { .. } => todo!(),
-        ClauseGuard::GtEqInt { .. } => todo!(),
-        ClauseGuard::LtInt { .. } => todo!(),
-        ClauseGuard::LtEqInt { .. } => todo!(),
-        ClauseGuard::GtFloat { .. } => todo!(),
-        ClauseGuard::GtEqFloat { .. } => todo!(),
-        ClauseGuard::LtFloat { .. } => todo!(),
-        ClauseGuard::LtEqFloat { .. } => todo!(),
-        ClauseGuard::Or { .. } => todo!(),
-        ClauseGuard::And { .. } => todo!(),
-        ClauseGuard::Not { .. } => todo!(),
-        ClauseGuard::Var { name, .. } => {
-            encoder::Instruction::LocalGet(function.get_local_index(name.clone()))
+        ClauseGuard::And { left, right, .. } => {
+            let bool_type = program.resolve_prelude_type(PreludeType::Bool);
+
+            let lhs = encode_guard_clause(program, encoder, function, left);
+            let rhs = encode_guard_clause(program, encoder, function, right);
+
+            Instruction::If {
+                type_: BlockType::Result(bool_type),
+                cond: Box::new(Instruction::I32Eq {
+                    lhs: Box::new(runtime::bool_to_i32(program, lhs)),
+                    rhs: Box::new(Instruction::I32Const(1)),
+                }),
+                then: vec![rhs],
+                else_: vec![runtime::bool_false(program)],
+            }
         }
-        ClauseGuard::TupleIndex { .. } => todo!(),
-        ClauseGuard::FieldAccess { .. } => todo!(),
+        ClauseGuard::Not { expression, .. } => {
+            let value = encode_guard_clause(program, encoder, function, expression);
+
+            runtime::bool_negate(program, value)
+        }
+        ClauseGuard::Var { name, .. } => {
+            Instruction::LocalGet(function.get_local_index(name.clone()))
+        }
+        ClauseGuard::TupleIndex { index, tuple, .. } => {
+            let tuple_type_index = program.resolve_type_index(encoder, &tuple.type_());
+            let value = encode_guard_clause(program, encoder, function, tuple);
+
+            runtime::tuple_get(tuple_type_index, value, (*index).try_into().unwrap())
+        }
+        ClauseGuard::FieldAccess {
+            container,
+            index: Some(index),
+            ..
+        } => {
+            let container_type_index = program.resolve_type_index(encoder, &container.type_());
+            let record = encode_guard_clause(program, encoder, function, container);
+
+            runtime::get_field_from_type(container_type_index, (*index).try_into().unwrap(), record)
+        }
+        // TODO: When can index be none for a field access?
+        ClauseGuard::FieldAccess { index: None, .. } => todo!(),
         ClauseGuard::ModuleSelect { .. } => todo!(),
         ClauseGuard::Constant(constant) => match constant {
-            Constant::Int { value, .. } => encode_int(program, value.parse().unwrap()).unwrap(),
-            Constant::Float { .. } => todo!(),
+            Constant::Int { value, .. } => encode_int(program, value).unwrap(),
+            Constant::Float { value, .. } => encode_float(program, value).unwrap(),
             Constant::String { .. } => todo!(),
             Constant::Tuple { .. } => todo!(),
             Constant::List { .. } => todo!(),
@@ -730,31 +905,31 @@ fn encode_guard_clause(
 
 fn encode_case_clause(
     program: &mut Program,
-    encoder: &mut encoder::Module,
-    function: &mut encoder::Function,
+    encoder: &mut Module,
+    function: &mut Function,
     clause: &Clause<TypedExpr, Arc<Type>, EcoString>,
     subjects: &[Index<Local>],
-) -> encoder::Instruction {
+) -> Instruction {
     std::iter::once(&clause.pattern)
         .chain(clause.alternative_patterns.iter())
-        .rfold(encoder::Instruction::I32Const(0), |else_, patterns| {
-            encoder::Instruction::If {
-                type_: encoder::BlockType::Result(encoder::ValType::I32),
+        .rfold(Instruction::I32Const(0), |else_, patterns| {
+            Instruction::If {
+                type_: BlockType::Result(ValType::I32),
                 cond: Box::new(patterns.iter().zip(subjects.iter()).rfold(
-                    encoder::Instruction::I32Const(1),
+                    Instruction::I32Const(1),
                     |then, (pattern, subject)| {
                         let condition =
                             encode_case_pattern(program, encoder, function, pattern, *subject);
 
-                        encoder::Instruction::If {
-                            type_: encoder::BlockType::Result(encoder::ValType::I32),
+                        Instruction::If {
+                            type_: BlockType::Result(ValType::I32),
                             cond: Box::new(condition),
                             then: vec![then],
-                            else_: vec![encoder::Instruction::I32Const(0)],
+                            else_: vec![Instruction::I32Const(0)],
                         }
                     },
                 )),
-                then: vec![encoder::Instruction::I32Const(1)],
+                then: vec![Instruction::I32Const(1)],
                 else_: vec![else_],
             }
         })
@@ -762,73 +937,62 @@ fn encode_case_clause(
 
 fn encode_case_pattern(
     program: &mut Program,
-    encoder: &mut encoder::Module,
-    function: &mut encoder::Function,
+    encoder: &mut Module,
+    function: &mut Function,
     pattern: &Pattern<Arc<Type>>,
     subject: Index<Local>,
-) -> encoder::Instruction {
+) -> Instruction {
     match pattern {
         Pattern::Int { value, .. } => {
-            let int_type_index = program.resolve_prelude_type_index(PreludeType::Int);
-
             let value = value.parse::<i64>().unwrap();
 
-            encoder::Instruction::I64Eq {
-                lhs: Box::new(encoder::Instruction::StructGet {
-                    from: Box::new(encoder::Instruction::LocalGet(subject)),
-                    type_: int_type_index,
-                    index: 0,
-                }),
-                rhs: Box::new(encoder::Instruction::I64Const(value)),
+            Instruction::I64Eq {
+                lhs: Box::new(runtime::int_to_i64(program, Instruction::LocalGet(subject))),
+                rhs: Box::new(Instruction::I64Const(value)),
             }
         }
         Pattern::Float { value, .. } => {
-            let float_type_index = program.resolve_prelude_type_index(PreludeType::Float);
-
             let value = value.parse::<f64>().unwrap();
 
-            encoder::Instruction::F64Eq {
-                lhs: Box::new(encoder::Instruction::StructGet {
-                    from: Box::new(encoder::Instruction::LocalGet(subject)),
-                    type_: float_type_index,
-                    index: 0,
-                }),
-                rhs: Box::new(encoder::Instruction::F64Const(value)),
+            Instruction::F64Eq {
+                lhs: Box::new(runtime::float_to_f64(
+                    program,
+                    Instruction::LocalGet(subject),
+                )),
+                rhs: Box::new(Instruction::F64Const(value)),
             }
         }
-        Pattern::String { value, .. } => encoder::Instruction::If {
-            type_: encoder::BlockType::Result(encoder::ValType::I32),
+        Pattern::String { value, .. } => Instruction::If {
+            type_: BlockType::Result(ValType::I32),
             // If the string lengths aren't equal, they cannot be equal
             // so we early return.
-            cond: Box::new(encoder::Instruction::I32Eq {
-                lhs: Box::new(encoder::Instruction::ArrayLen(Box::new(
-                    encoder::Instruction::LocalGet(subject),
-                ))),
-                rhs: Box::new(encoder::Instruction::I32Const(
-                    value.len().try_into().unwrap(),
-                )),
+            cond: Box::new(Instruction::I32Eq {
+                lhs: Box::new(Instruction::ArrayLen(Box::new(Instruction::LocalGet(
+                    subject,
+                )))),
+                rhs: Box::new(Instruction::I32Const(value.len().try_into().unwrap())),
             }),
             then: vec![string_compare(
                 program,
                 encoder,
                 function,
                 value,
-                encoder::Instruction::LocalGet(subject),
+                Instruction::LocalGet(subject),
             )],
-            else_: vec![encoder::Instruction::I32Const(0)],
+            else_: vec![Instruction::I32Const(0)],
         },
         Pattern::Variable { name, type_, .. } => {
             let type_ = program.resolve_type(encoder, type_);
             let local = function.declare_local(name.clone(), type_);
 
-            encoder::Instruction::Block {
-                type_: encoder::BlockType::Result(encoder::ValType::I32),
+            Instruction::Block {
+                type_: BlockType::Result(ValType::I32),
                 code: vec![
-                    encoder::Instruction::LocalSet {
+                    Instruction::LocalSet {
                         local,
-                        value: Box::new(encoder::Instruction::LocalGet(subject)),
+                        value: Box::new(Instruction::LocalGet(subject)),
                     },
-                    encoder::Instruction::I32Const(1),
+                    Instruction::I32Const(1),
                 ],
             }
         }
@@ -837,301 +1001,303 @@ fn encode_case_pattern(
             let local_type = program.resolve_type(encoder, &pattern.type_());
             let local = function.declare_local(name.clone(), local_type);
 
-            encoder::Instruction::If {
-                type_: encoder::BlockType::Result(encoder::ValType::I32),
+            Instruction::If {
+                type_: BlockType::Result(ValType::I32),
                 cond: Box::new(encode_case_pattern(
                     program, encoder, function, pattern, subject,
                 )),
                 then: vec![
-                    encoder::Instruction::LocalSet {
+                    Instruction::LocalSet {
                         local,
-                        value: Box::new(encoder::Instruction::LocalGet(subject)),
+                        value: Box::new(Instruction::LocalGet(subject)),
                     },
-                    encoder::Instruction::I32Const(1),
+                    Instruction::I32Const(1),
                 ],
-                else_: vec![encoder::Instruction::I32Const(0)],
+                else_: vec![Instruction::I32Const(0)],
             }
         }
-        Pattern::Discard { .. } => encoder::Instruction::I32Const(1),
+        Pattern::Discard { .. } => Instruction::I32Const(1),
         Pattern::List {
-            location,
+            // location,
             elements,
             tail,
-            type_,
+            // type_,
+            ..
         } => {
-            let list_type_index = runtime::list_type_index(program);
-
-            match elements.as_slice() {
-                [] => match tail {
-                    Some(tail) => encode_case_pattern(program, encoder, function, tail, subject),
-                    None => encoder::Instruction::I32Const(1),
+            elements.iter().rfold(
+                if let Some(tail) = tail {
+                    encode_case_pattern(program, encoder, function, tail, subject)
+                } else {
+                    Instruction::RefIsNull(Box::new(Instruction::LocalGet(subject)))
                 },
-                [element, rest @ ..] => {
-                    let value_type_index = program.resolve_type_index(encoder, &element.type_());
-                    let value_type = program.resolve_type(encoder, &element.type_());
-                    let value_local = function.declare_anonymous_local(value_type);
+                |else_, element| {
+                    let is_null = Instruction::RefIsNull(Box::new(Instruction::LocalGet(subject)));
 
-                    let next_local =
-                        function.declare_anonymous_local(encoder::ValType::Ref(encoder::RefType {
-                            nullable: true,
-                            heap_type: encoder::HeapType::Concrete(list_type_index),
-                        }));
+                    let head = runtime::list_head(program, Instruction::LocalGet(subject));
+                    let tail = runtime::list_tail(program, Instruction::LocalGet(subject));
 
-                    encoder::Instruction::Block {
-                        type_: encoder::BlockType::Result(encoder::ValType::I32),
-                        code: vec![
-                            encoder::Instruction::LocalSet {
-                                local: value_local,
-                                value: Box::new(encoder::Instruction::RefCast {
-                                    type_: encoder::RefType {
-                                        nullable: true,
-                                        heap_type: encoder::HeapType::Concrete(value_type_index),
-                                    },
-                                    value: Box::new(encoder::Instruction::StructGet {
-                                        from: Box::new(encoder::Instruction::LocalGet(subject)),
-                                        type_: list_type_index,
-                                        index: 1,
-                                    }),
-                                }),
+                    let head_type_index = program.resolve_type_index(encoder, &element.type_());
+                    let head_type = HeapType::Concrete(head_type_index);
+
+                    let head_local = function
+                        .declare_anonymous_local(program.resolve_type(encoder, &element.type_()));
+
+                    // If the
+                    Instruction::If {
+                        type_: BlockType::Result(ValType::I32),
+                        cond: Box::new(is_null),
+                        then: vec![Instruction::I32Const(0)],
+                        else_: vec![
+                            Instruction::LocalSet {
+                                local: head_local,
+                                value: Box::new(runtime::cast_to(head, head_type)),
                             },
-                            encoder::Instruction::If {
-                                type_: encoder::BlockType::Result(encoder::ValType::I32),
+                            Instruction::If {
+                                type_: BlockType::Result(ValType::I32),
                                 cond: Box::new(encode_case_pattern(
-                                    program,
-                                    encoder,
-                                    function,
-                                    element,
-                                    value_local,
+                                    program, encoder, function, element, head_local,
                                 )),
                                 then: vec![
-                                    encoder::Instruction::LocalSet {
-                                        local: next_local,
-                                        value: Box::new(encoder::Instruction::StructGet {
-                                            from: Box::new(encoder::Instruction::LocalGet(subject)),
-                                            type_: list_type_index,
-                                            index: 0,
-                                        }),
+                                    Instruction::LocalSet {
+                                        local: subject,
+                                        value: Box::new(tail),
                                     },
-                                    encode_case_pattern(
-                                        program,
-                                        encoder,
-                                        function,
-                                        &Pattern::List {
-                                            location: location.clone(),
-                                            elements: rest.to_vec(),
-                                            tail: tail.clone(),
-                                            type_: type_.clone(),
-                                        },
-                                        next_local,
-                                    ),
+                                    else_,
                                 ],
-                                else_: vec![encoder::Instruction::I32Const(0)],
+                                else_: vec![Instruction::I32Const(0)],
                             },
                         ],
                     }
-                }
-            }
+                },
+            )
         }
         Pattern::Constructor {
-            name,
+            name: variant,
             arguments,
             type_,
             ..
         } => {
-            let type_index = program.resolve_type_index(encoder, type_);
-            let tag = program.resolve_type_variant_tag(type_index, name.clone());
-
             let Some((module, type_name)) = type_.named_type_name() else {
                 panic!("This should always be a named type")
             };
 
-            let variant_type_index = program.resolve_type_index_by_name(
-                module,
-                EcoString::from(format!("{}.{}", type_name, name)),
-            );
+            let type_index = program.resolve_type_index(encoder, type_);
+            let target_variant_tag = program.resolve_type_variant_tag(type_index, variant.clone());
 
-            let tags_match = encoder::Instruction::I32Eq {
-                lhs: Box::new(encoder::Instruction::StructGet {
-                    from: Box::new(encoder::Instruction::LocalGet(subject)),
-                    type_: type_index,
-                    index: 0,
-                }),
-                rhs: Box::new(encoder::Instruction::I32Const(tag)),
+            let variant_type_index =
+                program.resolve_variant_type_index_by_name(module, type_name, variant.clone());
+            let variant_heap_type = HeapType::Concrete(variant_type_index);
+
+            let subject_local = Instruction::LocalGet(subject);
+
+            let do_tags_match = Instruction::I32Eq {
+                lhs: Box::new(runtime::get_type_tag(type_index, subject_local.clone())),
+                rhs: Box::new(Instruction::I32Const(target_variant_tag)),
             };
 
-            let arguments_match = arguments.iter().enumerate().rfold(
-                encoder::Instruction::I32Const(1),
-                |then, (idx, arg)| {
-                    let field = encoder::Instruction::StructGet {
-                        from: Box::new(encoder::Instruction::RefCast {
-                            value: Box::new(encoder::Instruction::LocalGet(subject)),
-                            type_: encoder::RefType {
-                                nullable: true,
-                                heap_type: encoder::HeapType::Concrete(variant_type_index),
-                            },
-                        }),
-                        type_: variant_type_index,
-                        index: (1 + idx).try_into().unwrap(),
-                    };
+            let do_arguments_match =
+                arguments
+                    .iter()
+                    .enumerate()
+                    .rfold(Instruction::I32Const(1), |then, (idx, arg)| {
+                        let field = runtime::get_field_from_type(
+                            variant_type_index,
+                            idx,
+                            runtime::cast_to(subject_local.clone(), variant_heap_type.clone()),
+                        );
 
-                    let field_type = program.resolve_type(encoder, &arg.value.type_());
-                    let field_index = function.declare_anonymous_local(field_type);
+                        let field_local = function.declare_anonymous_local(
+                            program.resolve_type(encoder, &arg.value.type_()),
+                        );
 
-                    let cond =
-                        encode_case_pattern(program, encoder, function, &arg.value, field_index);
+                        let cond = encode_case_pattern(
+                            program,
+                            encoder,
+                            function,
+                            &arg.value,
+                            field_local,
+                        );
 
-                    encoder::Instruction::Block {
-                        type_: encoder::BlockType::Result(encoder::ValType::I32),
+                        Instruction::Block {
+                            type_: BlockType::Result(ValType::I32),
+                            code: vec![
+                                Instruction::LocalSet {
+                                    local: field_local,
+                                    value: Box::new(field),
+                                },
+                                Instruction::If {
+                                    type_: BlockType::Result(ValType::I32),
+                                    cond: Box::new(cond),
+                                    then: vec![then],
+                                    else_: vec![Instruction::I32Const(0)],
+                                },
+                            ],
+                        }
+                    });
+
+            Instruction::If {
+                type_: BlockType::Result(ValType::I32),
+                cond: Box::new(do_tags_match),
+                then: vec![do_arguments_match],
+                else_: vec![Instruction::I32Const(0)],
+            }
+        }
+        Pattern::Tuple { elems, .. } => {
+            elems
+                .iter()
+                .enumerate()
+                .rfold(Instruction::I32Const(1), |then, (index, element)| {
+                    let local_type = program.resolve_type(encoder, &element.type_());
+                    let local = function.declare_anonymous_local(local_type);
+
+                    let tuple_type_index = program.resolve_type_index(encoder, &pattern.type_());
+
+                    Instruction::Block {
+                        type_: BlockType::Result(ValType::I32),
                         code: vec![
-                            encoder::Instruction::LocalSet {
-                                local: field_index,
-                                value: Box::new(field),
+                            Instruction::LocalSet {
+                                local,
+                                value: Box::new(runtime::tuple_get(
+                                    tuple_type_index,
+                                    Instruction::LocalGet(subject),
+                                    index,
+                                )),
                             },
-                            encoder::Instruction::If {
-                                type_: encoder::BlockType::Result(encoder::ValType::I32),
-                                cond: Box::new(cond),
+                            Instruction::If {
+                                type_: BlockType::Result(ValType::I32),
+                                cond: Box::new(encode_case_pattern(
+                                    program, encoder, function, element, local,
+                                )),
                                 then: vec![then],
-                                else_: vec![encoder::Instruction::I32Const(0)],
+                                else_: vec![Instruction::I32Const(0)],
                             },
                         ],
                     }
-                },
-            );
-
-            encoder::Instruction::If {
-                type_: encoder::BlockType::Result(encoder::ValType::I32),
-                cond: Box::new(tags_match),
-                then: vec![arguments_match],
-                else_: vec![encoder::Instruction::I32Const(0)],
-            }
+                })
         }
-        Pattern::Tuple { elems, .. } => elems.iter().enumerate().rfold(
-            encoder::Instruction::I32Const(1),
-            |then, (index, element)| {
-                let local_type = program.resolve_type(encoder, &element.type_());
-                let local = function.declare_anonymous_local(local_type);
-
-                encoder::Instruction::Block {
-                    type_: encoder::BlockType::Result(encoder::ValType::I32),
-                    code: vec![
-                        encoder::Instruction::LocalSet {
-                            local,
-                            value: Box::new(encoder::Instruction::StructGet {
-                                from: Box::new(encoder::Instruction::LocalGet(subject)),
-                                type_: program.resolve_type_index(encoder, &pattern.type_()),
-                                index: index.try_into().unwrap(),
-                            }),
-                        },
-                        encoder::Instruction::If {
-                            type_: encoder::BlockType::Result(encoder::ValType::I32),
-                            cond: Box::new(encode_case_pattern(
-                                program, encoder, function, element, local,
-                            )),
-                            then: vec![then],
-                            else_: vec![encoder::Instruction::I32Const(0)],
-                        },
-                    ],
-                }
-            },
-        ),
         Pattern::BitArray { .. } => todo!(),
         Pattern::StringPrefix {
             left_side_string,
+            left_side_assignment,
             right_side_assignment,
             ..
-        } => encoder::Instruction::If {
-            type_: encoder::BlockType::Result(encoder::ValType::I32),
-            cond: Box::new(encoder::Instruction::I32GeS {
-                lhs: Box::new(encoder::Instruction::ArrayLen(Box::new(
-                    encoder::Instruction::LocalGet(subject),
-                ))),
-                rhs: Box::new(encoder::Instruction::I32Const(
-                    left_side_string.len().try_into().unwrap(),
-                )),
-            }),
-            then: vec![encoder::Instruction::If {
-                type_: encoder::BlockType::Result(encoder::ValType::I32),
-                cond: Box::new(string_compare(
-                    program,
-                    encoder,
-                    function,
-                    left_side_string.as_str(),
-                    encoder::Instruction::LocalGet(subject),
-                )),
-                then: match right_side_assignment {
+        } => {
+            let when_prefix_matched = {
+                let mut instructions = match left_side_assignment {
+                    Some((name, _)) => {
+                        let string_type = program.resolve_prelude_type(PreludeType::String);
+
+                        let local = if function.does_local_exist(name.clone())
+                            && function.get_local_type(name.clone()) == &string_type
+                        {
+                            function.get_local_index(name.clone())
+                        } else {
+                            function.declare_local(name.clone(), string_type)
+                        };
+
+                        vec![Instruction::LocalSet {
+                            local: local,
+                            value: Box::new(
+                                encode_string(program, encoder, left_side_string).unwrap(),
+                            ),
+                        }]
+                    }
+                    None => vec![],
+                };
+
+                match right_side_assignment {
                     AssignName::Variable(name) => {
+                        let string_type = program.resolve_prelude_type(PreludeType::String);
                         let string_type_index =
                             program.resolve_prelude_type_index(PreludeType::String);
 
-                        let local = function.declare_local(
-                            name.clone(),
-                            program.resolve_prelude_type(PreludeType::String),
-                        );
-
-                        let string_offset = left_side_string.len().try_into().unwrap();
-                        let string_length = encoder::Instruction::I32Sub {
-                            lhs: Box::new(encoder::Instruction::ArrayLen(Box::new(
-                                encoder::Instruction::LocalGet(subject),
-                            ))),
-                            rhs: Box::new(encoder::Instruction::I32Const(string_offset)),
+                        let local = if function.does_local_exist(name.clone())
+                            && function.get_local_type(name.clone()) == &string_type
+                        {
+                            function.get_local_index(name.clone())
+                        } else {
+                            function.declare_local(name.clone(), string_type)
                         };
 
-                        vec![
-                            encoder::Instruction::LocalSet {
-                                local,
-                                value: Box::new(encoder::Instruction::ArrayNewDefault {
-                                    type_: string_type_index,
-                                    size: Box::new(string_length.clone()),
-                                }),
-                            },
-                            encoder::Instruction::ArrayCopy {
-                                dst_type: string_type_index,
-                                dst: Box::new(encoder::Instruction::LocalGet(local)),
-                                dst_offset: Box::new(encoder::Instruction::I32Const(0)),
-                                src_type: string_type_index,
-                                src: Box::new(encoder::Instruction::LocalGet(subject)),
-                                src_offset: Box::new(encoder::Instruction::I32Const(string_offset)),
-                                size: Box::new(string_length),
-                            },
-                            encoder::Instruction::I32Const(1),
-                        ]
+                        let string_offset = left_side_string.len().try_into().unwrap();
+                        let string_length = Instruction::I32Sub {
+                            lhs: Box::new(Instruction::ArrayLen(Box::new(Instruction::LocalGet(
+                                subject,
+                            )))),
+                            rhs: Box::new(Instruction::I32Const(string_offset)),
+                        };
+
+                        instructions.push(Instruction::LocalSet {
+                            local,
+                            value: Box::new(Instruction::ArrayNewDefault {
+                                type_: string_type_index,
+                                size: Box::new(string_length.clone()),
+                            }),
+                        });
+                        instructions.push(Instruction::ArrayCopy {
+                            dst_type: string_type_index,
+                            dst: Box::new(Instruction::LocalGet(local)),
+                            dst_offset: Box::new(Instruction::I32Const(0)),
+                            src_type: string_type_index,
+                            src: Box::new(Instruction::LocalGet(subject)),
+                            src_offset: Box::new(Instruction::I32Const(string_offset)),
+                            size: Box::new(string_length),
+                        });
+                        instructions.push(Instruction::I32Const(1));
                     }
                     AssignName::Discard(_) => {
-                        vec![encoder::Instruction::I32Const(1)]
+                        instructions.push(Instruction::I32Const(1));
                     }
-                },
-                else_: vec![encoder::Instruction::I32Const(0)],
-            }],
-            else_: vec![encoder::Instruction::I32Const(0)],
-        },
+                };
+
+                instructions
+            };
+
+            Instruction::If {
+                type_: BlockType::Result(ValType::I32),
+                cond: Box::new(Instruction::I32GeS {
+                    lhs: Box::new(Instruction::ArrayLen(Box::new(Instruction::LocalGet(
+                        subject,
+                    )))),
+                    rhs: Box::new(Instruction::I32Const(
+                        left_side_string.len().try_into().unwrap(),
+                    )),
+                }),
+                then: vec![Instruction::If {
+                    type_: BlockType::Result(ValType::I32),
+                    cond: Box::new(string_compare(
+                        program,
+                        encoder,
+                        function,
+                        left_side_string.as_str(),
+                        Instruction::LocalGet(subject),
+                    )),
+                    then: when_prefix_matched,
+                    else_: vec![Instruction::I32Const(0)],
+                }],
+                else_: vec![Instruction::I32Const(0)],
+            }
+        }
     }
 }
 
 fn encode_expression(
     program: &mut Program,
-    encoder: &mut encoder::Module,
-    module: &Module,
-    function: &mut encoder::Function,
+    encoder: &mut Module,
+    module: &ModuleAst,
+    function: &mut Function,
     expression: &TypedExpr,
-) -> Result<encoder::Instruction> {
+) -> Result<Instruction> {
     match expression {
-        TypedExpr::Int { value, .. } => {
-            let value = value.parse::<i64>().expect("Value unsupported");
-
-            encode_int(program, value)
-        }
-        TypedExpr::Float { value, .. } => {
-            let value = value.parse::<f64>().expect("Value unsupported");
-
-            encode_float(program, value)
-        }
+        TypedExpr::Int { value, .. } => encode_int(program, value),
+        TypedExpr::Float { value, .. } => encode_float(program, value),
         TypedExpr::String { value, .. } => encode_string(program, encoder, value),
         TypedExpr::Block { statements, .. } => {
             let block_type = program.resolve_type(encoder, &expression.type_());
             let block = encode_block(program, encoder, module, function, statements)?;
 
-            Ok(encoder::Instruction::Block {
-                type_: encoder::BlockType::Result(block_type),
+            Ok(Instruction::Block {
+                type_: BlockType::Result(block_type),
                 code: block,
             })
         }
@@ -1148,7 +1314,7 @@ fn encode_expression(
                     let assignment =
                         encode_assignment(program, encoder, module, function, assignment)?;
 
-                    Ok(encoder::Instruction::Drop(Box::new(assignment)))
+                    Ok(Instruction::Drop(Box::new(assignment)))
                 })
                 .collect::<Result<Vec<_>>>()?;
 
@@ -1156,8 +1322,8 @@ fn encode_expression(
                 program, encoder, module, function, finally,
             )?);
 
-            Ok(encoder::Instruction::Block {
-                type_: encoder::BlockType::Result(block_type),
+            Ok(Instruction::Block {
+                type_: BlockType::Result(block_type),
                 code: statements,
             })
         }
@@ -1167,19 +1333,11 @@ fn encode_expression(
             ValueConstructorVariant::LocalVariable { .. } => {
                 let local_index = function.get_local_index(name.clone());
 
-                Ok(encoder::Instruction::LocalGet(local_index))
+                Ok(Instruction::LocalGet(local_index))
             }
             ValueConstructorVariant::ModuleConstant { literal, .. } => match literal {
-                Constant::Int { value, .. } => {
-                    let value = value.parse().unwrap();
-
-                    encode_int(program, value)
-                }
-                Constant::Float { value, .. } => {
-                    let value = value.parse().unwrap();
-
-                    encode_float(program, value)
-                }
+                Constant::Int { value, .. } => encode_int(program, value),
+                Constant::Float { value, .. } => encode_float(program, value),
                 Constant::String { value, .. } => encode_string(program, encoder, value),
                 Constant::Tuple { .. } => todo!(),
                 Constant::List { .. } => todo!(),
@@ -1195,11 +1353,11 @@ fn encode_expression(
                 let closure_type_index = program::runtime::closure_type_index(program);
                 let unit_type_index = program::runtime::unit_type_index(program);
 
-                Ok(encoder::Instruction::StructNew {
+                Ok(Instruction::StructNew {
                     type_: closure_type_index,
                     args: vec![
-                        encoder::Instruction::RefFunc(function_index),
-                        encoder::Instruction::StructNew {
+                        Instruction::RefFunc(function_index),
+                        Instruction::StructNew {
                             type_: unit_type_index,
                             args: vec![],
                         },
@@ -1217,9 +1375,9 @@ fn encode_expression(
                 let unit_type_index = program::runtime::unit_type_index(program);
 
                 match arity {
-                    0 => Ok(encoder::Instruction::Call {
+                    0 => Ok(Instruction::Call {
                         func: function_index,
-                        args: vec![encoder::Instruction::StructNew {
+                        args: vec![Instruction::StructNew {
                             type_: unit_type_index,
                             args: vec![],
                         }],
@@ -1227,11 +1385,11 @@ fn encode_expression(
                     _ => {
                         let closure_type_index = program::runtime::closure_type_index(program);
 
-                        Ok(encoder::Instruction::StructNew {
+                        Ok(Instruction::StructNew {
                             type_: closure_type_index,
                             args: vec![
-                                encoder::Instruction::RefFunc(function_index),
-                                encoder::Instruction::StructNew {
+                                Instruction::RefFunc(function_index),
+                                Instruction::StructNew {
                                     type_: unit_type_index,
                                     args: vec![],
                                 },
@@ -1272,8 +1430,8 @@ fn encode_expression(
             let captured_struct_type = encoder::Type::Struct {
                 fields: captured
                     .iter()
-                    .map(|captured_type| encoder::FieldType {
-                        element_type: encoder::StorageType::Val(captured_type.clone()),
+                    .map(|captured_type| FieldType {
+                        element_type: StorageType::Val(captured_type.clone()),
                         mutable: true,
                     })
                     .collect_vec(),
@@ -1291,9 +1449,9 @@ fn encode_expression(
                 .map(|parameter| program.resolve_type(encoder, parameter))
                 .collect_vec();
 
-            lambda_parameters.push(encoder::ValType::Ref(encoder::RefType {
+            lambda_parameters.push(ValType::Ref(RefType {
                 nullable: true,
-                heap_type: encoder::HeapType::Struct,
+                heap_type: HeapType::Struct,
             }));
 
             let lambda_type = encoder::Type::Function {
@@ -1318,11 +1476,11 @@ fn encode_expression(
 
                 arguments.push(Some("_ctx".into()));
 
-                let mut lambda = encoder::Function::new(
+                let mut lambda = Function::new(
                     closure_index,
                     closure_type_index,
                     format!("{:?}", location).into(),
-                    encoder::FunctionLinkage::Export,
+                    FunctionLinkage::Export,
                     arguments,
                 );
 
@@ -1334,17 +1492,12 @@ fn encode_expression(
                 {
                     let local = lambda.declare_local(name.clone(), type_.clone());
 
-                    lambda.instruction(encoder::Instruction::LocalSet {
+                    lambda.instruction(Instruction::LocalSet {
                         local,
-                        value: Box::new(encoder::Instruction::StructGet {
-                            from: Box::new(encoder::Instruction::RefCast {
-                                value: Box::new(encoder::Instruction::LocalGet(context)),
-                                type_: encoder::RefType {
-                                    nullable: true,
-                                    heap_type: encoder::HeapType::Concrete(
-                                        captured_struct_type_index,
-                                    ),
-                                },
+                        value: Box::new(Instruction::StructGet {
+                            from: Box::new(Instruction::RefCastNullable {
+                                value: Box::new(Instruction::LocalGet(context)),
+                                type_: HeapType::Concrete(captured_struct_type_index),
                             }),
                             type_: captured_struct_type_index,
                             index: index.try_into().unwrap(),
@@ -1357,24 +1510,22 @@ fn encode_expression(
                     lambda.instruction(instruction);
                 }
 
-                lambda.instruction(encoder::Instruction::End);
+                lambda.instruction(Instruction::End);
                 lambda
             };
 
             encoder.define_function(closure_index, closure);
 
-            Ok(encoder::Instruction::StructNew {
+            Ok(Instruction::StructNew {
                 type_: closure_struct_type_index,
                 args: vec![
-                    encoder::Instruction::RefFunc(closure_index),
-                    encoder::Instruction::StructNew {
+                    Instruction::RefFunc(closure_index),
+                    Instruction::StructNew {
                         type_: captured_struct_type_index,
                         args: captured_variables
                             .iter()
                             .map(|variable| {
-                                encoder::Instruction::LocalGet(
-                                    function.get_local_index(variable.clone()),
-                                )
+                                Instruction::LocalGet(function.get_local_index(variable.clone()))
                             })
                             .collect_vec(),
                     },
@@ -1388,13 +1539,13 @@ fn encode_expression(
                 if let Some(tail) = tail {
                     encode_expression(program, encoder, module, function, tail).unwrap()
                 } else {
-                    encoder::Instruction::RefNull(encoder::HeapType::Concrete(list_type_index))
+                    Instruction::RefNull(HeapType::Concrete(list_type_index))
                 },
                 |next, element| {
                     let value =
                         encode_expression(program, encoder, module, function, element).unwrap();
 
-                    encoder::Instruction::StructNew {
+                    Instruction::StructNew {
                         type_: list_type_index,
                         args: vec![next, value],
                     }
@@ -1411,9 +1562,9 @@ fn encode_expression(
                         .iter()
                         .map(|arg| program.resolve_type(encoder, &arg.value.type_()))
                         .collect_vec();
-                    params.push(encoder::ValType::Ref(encoder::RefType {
+                    params.push(ValType::Ref(RefType {
                         nullable: true,
-                        heap_type: encoder::HeapType::Struct,
+                        heap_type: HeapType::Struct,
                     }));
                     params
                 },
@@ -1430,36 +1581,32 @@ fn encode_expression(
             let closure_struct_type_index = program::runtime::closure_type_index(program);
 
             let func_ref = encode_expression(program, encoder, module, function, &fun)?;
-            let func_ref_local =
-                function.declare_anonymous_local(encoder::ValType::Ref(encoder::RefType {
-                    nullable: true,
-                    heap_type: encoder::HeapType::Concrete(closure_struct_type_index),
-                }));
+            let func_ref_local = function.declare_anonymous_local(ValType::Ref(RefType {
+                nullable: true,
+                heap_type: HeapType::Concrete(closure_struct_type_index),
+            }));
 
-            Ok(encoder::Instruction::Block {
-                type_: encoder::BlockType::Result(type_),
+            Ok(Instruction::Block {
+                type_: BlockType::Result(type_),
                 code: vec![
-                    encoder::Instruction::LocalSet {
+                    Instruction::LocalSet {
                         local: func_ref_local,
                         value: Box::new(func_ref),
                     },
-                    encoder::Instruction::CallRef {
+                    Instruction::CallRef {
                         type_: closure_type_index,
-                        ref_: Box::new(encoder::Instruction::RefCast {
-                            value: Box::new(encoder::Instruction::StructGet {
-                                from: Box::new(encoder::Instruction::LocalGet(func_ref_local)),
+                        ref_: Box::new(Instruction::RefCastNullable {
+                            value: Box::new(Instruction::StructGet {
+                                from: Box::new(Instruction::LocalGet(func_ref_local)),
                                 type_: closure_struct_type_index,
                                 index: 0,
                             }),
-                            type_: encoder::RefType {
-                                nullable: true,
-                                heap_type: encoder::HeapType::Concrete(closure_type_index),
-                            },
+                            type_: HeapType::Concrete(closure_type_index),
                         }),
                         args: {
                             let mut args = arguments;
-                            args.push(encoder::Instruction::StructGet {
-                                from: Box::new(encoder::Instruction::LocalGet(func_ref_local)),
+                            args.push(Instruction::StructGet {
+                                from: Box::new(Instruction::LocalGet(func_ref_local)),
                                 type_: closure_struct_type_index,
                                 index: 1,
                             });
@@ -1473,327 +1620,248 @@ fn encode_expression(
             name, left, right, ..
         } => match name {
             BinOp::And => {
-                let bool_type_index = program.resolve_prelude_type_index(PreludeType::Bool);
                 let bool_type = program.resolve_prelude_type(PreludeType::Bool);
 
                 let lhs = encode_expression(program, encoder, module, function, left)?;
                 let rhs = encode_expression(program, encoder, module, function, right)?;
 
-                Ok(encoder::Instruction::If {
+                Ok(Instruction::If {
                     type_: BlockType::Result(bool_type),
-                    cond: Box::new(encoder::Instruction::I32Eq {
-                        lhs: Box::new(encoder::Instruction::StructGet {
-                            from: Box::new(lhs),
-                            type_: bool_type_index,
-                            index: 0,
-                        }),
-                        rhs: Box::new(encoder::Instruction::I32Const(1)),
+                    cond: Box::new(Instruction::I32Eq {
+                        lhs: Box::new(runtime::bool_to_i32(program, lhs)),
+                        rhs: Box::new(Instruction::I32Const(1)),
                     }),
                     then: vec![rhs],
-                    else_: vec![encoder::Instruction::StructNew {
-                        type_: bool_type_index,
-                        args: vec![encoder::Instruction::I32Const(0)],
-                    }],
+                    else_: vec![runtime::bool_false(program)],
                 })
             }
             BinOp::Or => {
-                let bool_type_index = program.resolve_prelude_type_index(PreludeType::Bool);
                 let bool_type = program.resolve_prelude_type(PreludeType::Bool);
 
                 let lhs = encode_expression(program, encoder, module, function, left)?;
                 let rhs = encode_expression(program, encoder, module, function, right)?;
 
-                Ok(encoder::Instruction::If {
+                Ok(Instruction::If {
                     type_: BlockType::Result(bool_type),
-                    cond: Box::new(encoder::Instruction::I32Eqz(Box::new(
-                        encoder::Instruction::StructGet {
-                            from: Box::new(lhs),
-                            type_: bool_type_index,
-                            index: 0,
-                        },
-                    ))),
+                    cond: Box::new(Instruction::I32Eqz(Box::new(runtime::bool_to_i32(
+                        program, lhs,
+                    )))),
                     then: vec![rhs],
-                    else_: vec![encoder::Instruction::StructNew {
-                        type_: bool_type_index,
-                        args: vec![encoder::Instruction::I32Const(1)],
-                    }],
+                    else_: vec![runtime::bool_true(program)],
                 })
             }
             BinOp::Eq => {
-                let bool_type_index = program.resolve_prelude_type_index(PreludeType::Bool);
-                let type_index = program.resolve_type_index(encoder, &left.type_());
+                let lhs = encode_expression(program, encoder, module, function, left)?;
+                let rhs = encode_expression(program, encoder, module, function, right)?;
 
-                Ok(encoder::Instruction::StructNew {
-                    type_: bool_type_index,
-                    args: vec![encoder::Instruction::Call {
-                        func: program.resolve_equality_index(type_index),
-                        args: vec![
-                            encode_expression(program, encoder, module, function, left)?,
-                            encode_expression(program, encoder, module, function, right)?,
-                        ],
-                    }],
-                })
+                Ok(runtime::eq(program, encoder, &left.type_(), lhs, rhs))
             }
             BinOp::NotEq => {
-                let bool_type_index = program.resolve_prelude_type_index(PreludeType::Bool);
-                let type_index = program.resolve_type_index(encoder, &left.type_());
-                let equality_index = program.resolve_equality_index(type_index);
+                let lhs = encode_expression(program, encoder, module, function, left)?;
+                let rhs = encode_expression(program, encoder, module, function, right)?;
 
-                Ok(encoder::Instruction::StructNew {
-                    type_: bool_type_index,
-                    args: vec![encoder::Instruction::I32Eqz(Box::new(
-                        encoder::Instruction::Call {
-                            func: equality_index,
-                            args: vec![
-                                encode_expression(program, encoder, module, function, left)?,
-                                encode_expression(program, encoder, module, function, right)?,
-                            ],
-                        },
-                    ))],
-                })
+                let are_equal = runtime::eq(program, encoder, &left.type_(), lhs, rhs);
+
+                Ok(runtime::bool_negate(program, are_equal))
             }
             BinOp::LtInt | BinOp::LtEqInt | BinOp::GtEqInt | BinOp::GtInt => {
-                let bool_type_index = program.resolve_prelude_type_index(PreludeType::Bool);
-                let int_type_index = program.resolve_prelude_type_index(PreludeType::Int);
-
                 let lhs = encode_expression(program, encoder, module, function, left)?;
-                let lhs = encoder::Instruction::StructGet {
-                    from: Box::new(lhs),
-                    type_: int_type_index,
-                    index: 0,
-                };
+                let lhs = runtime::int_to_i64(program, lhs);
 
                 let rhs = encode_expression(program, encoder, module, function, right)?;
-                let rhs = encoder::Instruction::StructGet {
-                    from: Box::new(rhs),
-                    type_: int_type_index,
-                    index: 0,
-                };
+                let rhs = runtime::int_to_i64(program, rhs);
 
-                Ok(encoder::Instruction::StructNew {
-                    type_: bool_type_index,
-                    args: vec![match name {
-                        BinOp::LtInt => encoder::Instruction::I64LtS {
+                Ok(runtime::bool(
+                    program,
+                    match name {
+                        BinOp::LtInt => Instruction::I64LtS {
                             lhs: Box::new(lhs),
                             rhs: Box::new(rhs),
                         },
-                        BinOp::LtEqInt => encoder::Instruction::I64LeS {
+                        BinOp::LtEqInt => Instruction::I64LeS {
                             lhs: Box::new(lhs),
                             rhs: Box::new(rhs),
                         },
-                        BinOp::GtEqInt => encoder::Instruction::I64GeS {
+                        BinOp::GtEqInt => Instruction::I64GeS {
                             lhs: Box::new(lhs),
                             rhs: Box::new(rhs),
                         },
-                        BinOp::GtInt => encoder::Instruction::I64GtS {
+                        BinOp::GtInt => Instruction::I64GtS {
                             lhs: Box::new(lhs),
                             rhs: Box::new(rhs),
                         },
                         _ => unreachable!(),
-                    }],
-                })
+                    },
+                ))
             }
             BinOp::LtFloat | BinOp::LtEqFloat | BinOp::GtEqFloat | BinOp::GtFloat => {
-                let bool_type_index = program.resolve_prelude_type_index(PreludeType::Bool);
-                let float_type_index = program.resolve_prelude_type_index(PreludeType::Float);
-
                 let lhs = encode_expression(program, encoder, module, function, left)?;
-                let lhs = encoder::Instruction::StructGet {
-                    from: Box::new(lhs),
-                    type_: float_type_index,
-                    index: 0,
-                };
+                let lhs = runtime::float_to_f64(program, lhs);
 
                 let rhs = encode_expression(program, encoder, module, function, right)?;
-                let rhs = encoder::Instruction::StructGet {
-                    from: Box::new(rhs),
-                    type_: float_type_index,
-                    index: 0,
-                };
+                let rhs = runtime::float_to_f64(program, rhs);
 
-                Ok(encoder::Instruction::StructNew {
-                    type_: bool_type_index,
-                    args: vec![match name {
-                        BinOp::LtFloat => encoder::Instruction::F64Lt {
+                Ok(runtime::bool(
+                    program,
+                    match name {
+                        BinOp::LtFloat => Instruction::F64Lt {
                             lhs: Box::new(lhs),
                             rhs: Box::new(rhs),
                         },
-                        BinOp::LtEqFloat => encoder::Instruction::F64Le {
+                        BinOp::LtEqFloat => Instruction::F64Le {
                             lhs: Box::new(lhs),
                             rhs: Box::new(rhs),
                         },
-                        BinOp::GtEqFloat => encoder::Instruction::F64Ge {
+                        BinOp::GtEqFloat => Instruction::F64Ge {
                             lhs: Box::new(lhs),
                             rhs: Box::new(rhs),
                         },
-                        BinOp::GtFloat => encoder::Instruction::F64Gt {
+                        BinOp::GtFloat => Instruction::F64Gt {
                             lhs: Box::new(lhs),
                             rhs: Box::new(rhs),
                         },
                         _ => unreachable!(),
-                    }],
-                })
+                    },
+                ))
             }
             BinOp::AddInt
             | BinOp::SubInt
             | BinOp::MultInt
             | BinOp::DivInt
             | BinOp::RemainderInt => {
-                let int_constructor_index = runtime::int_constructor(program);
-                let int_type_index = program.resolve_prelude_type_index(PreludeType::Int);
-
                 let lhs = encode_expression(program, encoder, module, function, left)?;
-                let lhs = encoder::Instruction::StructGet {
-                    from: Box::new(lhs),
-                    type_: int_type_index,
-                    index: 0,
-                };
+                let lhs = runtime::int_to_i64(program, lhs);
 
                 let rhs = encode_expression(program, encoder, module, function, right)?;
-                let rhs = encoder::Instruction::StructGet {
-                    from: Box::new(rhs),
-                    type_: int_type_index,
-                    index: 0,
-                };
+                let rhs = runtime::int_to_i64(program, rhs);
 
-                Ok(encoder::Instruction::Call {
-                    func: int_constructor_index,
-                    args: vec![match name {
-                        BinOp::AddInt => encoder::Instruction::I64Add {
+                Ok(runtime::int(
+                    program,
+                    match name {
+                        BinOp::AddInt => Instruction::I64Add {
                             lhs: Box::new(lhs),
                             rhs: Box::new(rhs),
                         },
-                        BinOp::SubInt => encoder::Instruction::I64Sub {
+                        BinOp::SubInt => Instruction::I64Sub {
                             lhs: Box::new(lhs),
                             rhs: Box::new(rhs),
                         },
-                        BinOp::MultInt => encoder::Instruction::I64Mul {
+                        BinOp::MultInt => Instruction::I64Mul {
                             lhs: Box::new(lhs),
                             rhs: Box::new(rhs),
                         },
-                        BinOp::DivInt => encoder::Instruction::I64DivS {
+                        BinOp::DivInt => Instruction::I64DivS {
                             lhs: Box::new(lhs),
                             rhs: Box::new(rhs),
                         },
-                        BinOp::RemainderInt => encoder::Instruction::I64RemS {
+                        BinOp::RemainderInt => Instruction::I64RemS {
                             lhs: Box::new(lhs),
                             rhs: Box::new(rhs),
                         },
                         _ => unreachable!(),
-                    }],
-                })
+                    },
+                ))
             }
             BinOp::AddFloat | BinOp::SubFloat | BinOp::MultFloat | BinOp::DivFloat => {
-                let float_constructor_index = runtime::float_constructor(program);
-                let float_type_index = program.resolve_prelude_type_index(PreludeType::Float);
-
                 let lhs = encode_expression(program, encoder, module, function, left)?;
-                let lhs = encoder::Instruction::StructGet {
-                    from: Box::new(lhs),
-                    type_: float_type_index,
-                    index: 0,
-                };
+                let lhs = runtime::float_to_f64(program, lhs);
 
                 let rhs = encode_expression(program, encoder, module, function, right)?;
-                let rhs = encoder::Instruction::StructGet {
-                    from: Box::new(rhs),
-                    type_: float_type_index,
-                    index: 0,
-                };
+                let rhs = runtime::float_to_f64(program, rhs);
 
-                Ok(encoder::Instruction::Call {
-                    func: float_constructor_index,
-                    args: vec![match name {
-                        BinOp::AddFloat => encoder::Instruction::F64Add {
+                Ok(runtime::float(
+                    program,
+                    match name {
+                        BinOp::AddFloat => Instruction::F64Add {
                             lhs: Box::new(lhs),
                             rhs: Box::new(rhs),
                         },
-                        BinOp::SubFloat => encoder::Instruction::F64Sub {
+                        BinOp::SubFloat => Instruction::F64Sub {
                             lhs: Box::new(lhs),
                             rhs: Box::new(rhs),
                         },
-                        BinOp::MultFloat => encoder::Instruction::F64Mul {
+                        BinOp::MultFloat => Instruction::F64Mul {
                             lhs: Box::new(lhs),
                             rhs: Box::new(rhs),
                         },
-                        BinOp::DivFloat => encoder::Instruction::F64Div {
+                        BinOp::DivFloat => Instruction::F64Div {
                             lhs: Box::new(lhs),
                             rhs: Box::new(rhs),
                         },
                         _ => unreachable!(),
-                    }],
-                })
+                    },
+                ))
             }
             BinOp::Concatenate => {
                 let string_type_index = program.resolve_prelude_type_index(PreludeType::String);
 
-                let local_type = encoder::ValType::Ref(encoder::RefType {
+                let local_type = ValType::Ref(RefType {
                     nullable: true,
-                    heap_type: encoder::HeapType::Concrete(string_type_index),
+                    heap_type: HeapType::Concrete(string_type_index),
                 });
 
                 let string = function.declare_anonymous_local(local_type.clone());
                 let lhs = function.declare_anonymous_local(local_type.clone());
                 let rhs = function.declare_anonymous_local(local_type.clone());
 
-                Ok(encoder::Instruction::Block {
-                    type_: encoder::BlockType::Result(local_type),
+                Ok(Instruction::Block {
+                    type_: BlockType::Result(local_type),
                     code: vec![
-                        encoder::Instruction::LocalSet {
+                        Instruction::LocalSet {
                             local: lhs,
                             value: Box::new(encode_expression(
                                 program, encoder, module, function, left,
                             )?),
                         },
-                        encoder::Instruction::LocalSet {
+                        Instruction::LocalSet {
                             local: rhs,
                             value: Box::new(encode_expression(
                                 program, encoder, module, function, right,
                             )?),
                         },
                         // Create new string
-                        encoder::Instruction::LocalSet {
+                        Instruction::LocalSet {
                             local: string,
-                            value: Box::new(encoder::Instruction::ArrayNewDefault {
+                            value: Box::new(Instruction::ArrayNewDefault {
                                 type_: string_type_index,
-                                size: Box::new(encoder::Instruction::I32Add {
-                                    lhs: Box::new(encoder::Instruction::ArrayLen(Box::new(
-                                        encoder::Instruction::LocalGet(lhs),
+                                size: Box::new(Instruction::I32Add {
+                                    lhs: Box::new(Instruction::ArrayLen(Box::new(
+                                        Instruction::LocalGet(lhs),
                                     ))),
-                                    rhs: Box::new(encoder::Instruction::ArrayLen(Box::new(
-                                        encoder::Instruction::LocalGet(rhs),
+                                    rhs: Box::new(Instruction::ArrayLen(Box::new(
+                                        Instruction::LocalGet(rhs),
                                     ))),
                                 }),
                             }),
                         },
                         // Copy lhs into the new string
-                        encoder::Instruction::ArrayCopy {
+                        Instruction::ArrayCopy {
                             dst_type: string_type_index,
-                            dst: Box::new(encoder::Instruction::LocalGet(string)),
-                            dst_offset: Box::new(encoder::Instruction::I32Const(0)),
+                            dst: Box::new(Instruction::LocalGet(string)),
+                            dst_offset: Box::new(Instruction::I32Const(0)),
                             src_type: string_type_index,
-                            src: Box::new(encoder::Instruction::LocalGet(lhs)),
-                            src_offset: Box::new(encoder::Instruction::I32Const(0)),
-                            size: Box::new(encoder::Instruction::ArrayLen(Box::new(
-                                encoder::Instruction::LocalGet(lhs),
-                            ))),
+                            src: Box::new(Instruction::LocalGet(lhs)),
+                            src_offset: Box::new(Instruction::I32Const(0)),
+                            size: Box::new(Instruction::ArrayLen(Box::new(Instruction::LocalGet(
+                                lhs,
+                            )))),
                         },
                         // Copy rhs into the new string
-                        encoder::Instruction::ArrayCopy {
+                        Instruction::ArrayCopy {
                             dst_type: string_type_index,
-                            dst: Box::new(encoder::Instruction::LocalGet(string)),
-                            dst_offset: Box::new(encoder::Instruction::ArrayLen(Box::new(
-                                encoder::Instruction::LocalGet(lhs),
+                            dst: Box::new(Instruction::LocalGet(string)),
+                            dst_offset: Box::new(Instruction::ArrayLen(Box::new(
+                                Instruction::LocalGet(lhs),
                             ))),
                             src_type: string_type_index,
-                            src: Box::new(encoder::Instruction::LocalGet(rhs)),
-                            src_offset: Box::new(encoder::Instruction::I32Const(0)),
-                            size: Box::new(encoder::Instruction::ArrayLen(Box::new(
-                                encoder::Instruction::LocalGet(rhs),
-                            ))),
+                            src: Box::new(Instruction::LocalGet(rhs)),
+                            src_offset: Box::new(Instruction::I32Const(0)),
+                            size: Box::new(Instruction::ArrayLen(Box::new(Instruction::LocalGet(
+                                rhs,
+                            )))),
                         },
                         // Get the string
-                        encoder::Instruction::LocalGet(string),
+                        Instruction::LocalGet(string),
                     ],
                 })
             }
@@ -1821,50 +1889,44 @@ fn encode_expression(
                     let value =
                         encode_expression(program, encoder, module, function, subject).unwrap();
 
-                    encoder::Instruction::LocalSet {
+                    Instruction::LocalSet {
                         local: *local,
                         value: Box::new(value),
                     }
                 })
                 .collect_vec();
 
-            let block_type = encoder::BlockType::Result(program.resolve_type(encoder, typ));
+            let block_type = BlockType::Result(program.resolve_type(encoder, typ));
 
             code.push(
                 clauses
                     .iter()
-                    .rfold(encoder::Instruction::Unreachable, |else_, clause| {
+                    .rfold(Instruction::Unreachable, |else_, clause| {
                         let condition =
                             encode_case_clause(program, encoder, function, clause, &subject_locals);
 
                         let guard = match &clause.guard {
                             Some(guard) => {
-                                let bool_type_index =
-                                    program.resolve_prelude_type_index(PreludeType::Bool);
+                                let guard_clause =
+                                    encode_guard_clause(program, encoder, function, guard);
 
-                                encoder::Instruction::StructGet {
-                                    type_: bool_type_index,
-                                    from: Box::new(encode_guard_clause(
-                                        program, encoder, function, guard,
-                                    )),
-                                    index: 0,
-                                }
+                                runtime::bool_to_i32(program, guard_clause)
                             }
-                            None => encoder::Instruction::I32Const(1),
+                            None => Instruction::I32Const(1),
                         };
 
-                        let condition = encoder::Instruction::If {
-                            type_: BlockType::Result(encoder::ValType::I32),
+                        let condition = Instruction::If {
+                            type_: BlockType::Result(ValType::I32),
                             cond: Box::new(condition),
                             then: vec![guard],
-                            else_: vec![encoder::Instruction::I32Const(0)],
+                            else_: vec![Instruction::I32Const(0)],
                         };
 
                         let then =
                             encode_expression(program, encoder, module, function, &clause.then)
                                 .unwrap();
 
-                        encoder::Instruction::If {
+                        Instruction::If {
                             type_: block_type.clone(),
                             cond: Box::new(condition),
                             then: vec![then],
@@ -1873,7 +1935,7 @@ fn encode_expression(
                     }),
             );
 
-            Ok(encoder::Instruction::Block {
+            Ok(Instruction::Block {
                 type_: block_type.clone(),
                 code,
             })
@@ -1884,7 +1946,7 @@ fn encode_expression(
             let index = u32::try_from(*index + 1).expect("Record is too large");
             let record = encode_expression(program, encoder, module, function, record)?;
 
-            Ok(encoder::Instruction::StructGet {
+            Ok(Instruction::StructGet {
                 from: Box::new(record),
                 type_: heap_type_index,
                 index,
@@ -1903,11 +1965,11 @@ fn encode_expression(
                 let closure_type_index = program::runtime::closure_type_index(program);
                 let unit_type_index = program::runtime::unit_type_index(program);
 
-                Ok(encoder::Instruction::StructNew {
+                Ok(Instruction::StructNew {
                     type_: closure_type_index,
                     args: vec![
-                        encoder::Instruction::RefFunc(function_index),
-                        encoder::Instruction::StructNew {
+                        Instruction::RefFunc(function_index),
+                        Instruction::StructNew {
                             type_: unit_type_index,
                             args: vec![],
                         },
@@ -1915,16 +1977,8 @@ fn encode_expression(
                 })
             }
             ModuleValueConstructor::Constant { literal, .. } => match literal {
-                Constant::Int { value, .. } => {
-                    let value = value.parse().unwrap();
-
-                    encode_int(program, value)
-                }
-                Constant::Float { value, .. } => {
-                    let value = value.parse().unwrap();
-
-                    encode_float(program, value)
-                }
+                Constant::Int { value, .. } => encode_int(program, value),
+                Constant::Float { value, .. } => encode_float(program, value),
                 Constant::String { value, .. } => encode_string(program, encoder, value),
                 Constant::Tuple { .. } => todo!(),
                 Constant::List { .. } => todo!(),
@@ -1941,7 +1995,7 @@ fn encode_expression(
                 .map(|elem| encode_expression(program, encoder, module, function, elem))
                 .collect::<Result<Vec<_>, _>>()?;
 
-            Ok(encoder::Instruction::StructNew {
+            Ok(Instruction::StructNew {
                 type_: type_index,
                 args: arguments,
             })
@@ -1952,7 +2006,7 @@ fn encode_expression(
 
             let tuple = encode_expression(program, encoder, module, function, tuple)?;
 
-            Ok(encoder::Instruction::StructGet {
+            Ok(Instruction::StructGet {
                 from: Box::new(tuple),
                 type_: type_index,
                 index,
@@ -1969,41 +2023,29 @@ fn encode_expression(
         }
         TypedExpr::RecordUpdate { .. } => todo!(),
         TypedExpr::NegateBool { value, .. } => {
-            let bool_type_index = program.resolve_prelude_type_index(PreludeType::Bool);
             let value = encode_expression(program, encoder, module, function, value)?;
 
-            Ok(encoder::Instruction::StructNew {
-                type_: bool_type_index,
-                args: vec![encoder::Instruction::I32Xor {
-                    lhs: Box::new(encoder::Instruction::StructGet {
-                        from: Box::new(value),
-                        type_: bool_type_index,
-                        index: 0,
-                    }),
-                    rhs: Box::new(encoder::Instruction::I32Const(1)),
-                }],
-            })
+            let negated = Instruction::I32Xor {
+                lhs: Box::new(runtime::bool_to_i32(program, value)),
+                rhs: Box::new(Instruction::I32Const(1)),
+            };
+
+            Ok(runtime::bool(program, negated))
         }
         TypedExpr::NegateInt { value, .. } => {
-            let int_type_index = program.resolve_prelude_type_index(PreludeType::Int);
             let value = encode_expression(program, encoder, module, function, value)?;
 
-            Ok(encoder::Instruction::StructNew {
-                type_: int_type_index,
-                args: vec![encoder::Instruction::I64Sub {
-                    lhs: Box::new(encoder::Instruction::I64Const(0)),
-                    rhs: Box::new(encoder::Instruction::StructGet {
-                        from: Box::new(value),
-                        type_: int_type_index,
-                        index: 0,
-                    }),
-                }],
-            })
+            let negated = Instruction::I64Sub {
+                lhs: Box::new(Instruction::I64Const(0)),
+                rhs: Box::new(runtime::int_to_i64(program, value)),
+            };
+
+            Ok(runtime::int(program, negated))
         }
     }
 }
 
-fn get_custom_type_definitions(module: &Module) -> impl Iterator<Item = &CustomType<Arc<Type>>> {
+fn get_custom_type_definitions(module: &ModuleAst) -> impl Iterator<Item = &CustomType<Arc<Type>>> {
     module
         .ast
         .definitions
@@ -2014,7 +2056,7 @@ fn get_custom_type_definitions(module: &Module) -> impl Iterator<Item = &CustomT
         })
 }
 
-fn get_function_definitions(module: &Module) -> impl Iterator<Item = &TypedFunction> {
+fn get_function_definitions(module: &ModuleAst) -> impl Iterator<Item = &TypedFunction> {
     module
         .ast
         .definitions

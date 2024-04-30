@@ -1,0 +1,3 @@
+name = "test_guards"
+version = "1.0.0"
+target = "wasm"

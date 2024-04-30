@@ -1,0 +1,3 @@
+name = "test_mixed_tuple_a"
+version = "1.0.0"
+target = "wasm"

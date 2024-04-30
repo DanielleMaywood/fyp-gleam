@@ -1,0 +1,3 @@
+name = "test_bool_true"
+version = "1.0.0"
+target = "wasm"

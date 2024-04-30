@@ -1,0 +1,3 @@
+name = "test_string_prefix"
+version = "1.0.0"
+target = "wasm"

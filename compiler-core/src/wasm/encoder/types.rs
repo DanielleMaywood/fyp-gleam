@@ -7,6 +7,7 @@ use super::{Encode, Encoder, Index, Module};
 pub enum BlockType {
     Empty,
     Result(ValType),
+    FunctionType(Index<Type>),
 }
 
 impl Encode for BlockType {
@@ -18,11 +19,12 @@ impl Encode for BlockType {
             BlockType::Result(val_type) => {
                 wasm_encoder::BlockType::Result(val_type.encode(module, encoder))
             }
+            BlockType::FunctionType(index) => wasm_encoder::BlockType::FunctionType(index.get()),
         }
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)]
 pub enum ValType {
     I32,
@@ -48,7 +50,7 @@ impl Encode for ValType {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RefType {
     pub nullable: bool,
     pub heap_type: HeapType,
@@ -65,7 +67,7 @@ impl Encode for RefType {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)]
 pub enum HeapType {
     Func,

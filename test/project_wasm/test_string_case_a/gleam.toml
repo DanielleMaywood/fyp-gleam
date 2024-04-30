@@ -1,0 +1,3 @@
+name = "test_string_case_a"
+version = "1.0.0"
+target = "wasm"

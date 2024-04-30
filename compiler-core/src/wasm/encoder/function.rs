@@ -71,6 +71,10 @@ impl Function {
         index
     }
 
+    pub fn does_local_exist(&self, name: EcoString) -> bool {
+        self.local_map.get(&name.clone()).is_some()
+    }
+
     pub fn get_local_index(&self, name: EcoString) -> Index<Local> {
         self.local_map
             .get(&name.clone())

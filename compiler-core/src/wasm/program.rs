@@ -176,6 +176,15 @@ impl Program {
             .unwrap_or_else(|| panic!("Type index should be defined for '{module}.{name}'",))
     }
 
+    pub fn resolve_variant_type_index_by_name(
+        &self,
+        module: EcoString,
+        name: EcoString,
+        variant: EcoString,
+    ) -> Index<encoder::Type> {
+        self.resolve_type_index_by_name(module, EcoString::from(format!("{name}.{variant}")))
+    }
+
     pub fn resolve_function_index_by_name(
         &self,
         module: EcoString,
