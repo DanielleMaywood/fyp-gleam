@@ -26,7 +26,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # Checksums
 sha2 = "0.10.8"
 # Getting hostname
-hostname = "0.3.1"
+hostname = "0.4.0"
 # TOML parser/editor that preserves comments & formatting
 toml_edit = "0.9"
 # File locking
