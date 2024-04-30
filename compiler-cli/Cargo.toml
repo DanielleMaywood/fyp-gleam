@@ -28,7 +28,7 @@ sha2 = "0.10.8"
 # Getting hostname
 hostname = "0.3.1"
 # TOML parser/editor that preserves comments & formatting
-toml_edit = "0.9"
+toml_edit = "0.22"
 # File locking
 fslock = "0.2.1"
 # Provides a way to determine if two files are the same using filesystem node ids
