@@ -43,7 +43,7 @@ pathdiff = { version = "0.2.1", features = ["camino"] }
 # Memory arena using ids rather than references
 id-arena = "2.1"
 # Wasm binary generation
-wasm-encoder = "0.205.0"
+wasm-encoder = "0.212.0"
 async-trait.workspace = true
 base16.workspace = true
 bytes.workspace = true
